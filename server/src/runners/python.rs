@@ -5,21 +5,15 @@ use base64::Engine;
 use tokio::process::Command;
 use uuid::Uuid;
 
+use super::{ExecutionResult, LIB_PATH};
 use crate::config::Config;
 use crate::crypto;
 use crate::models::RunnerOptions;
 
-pub struct ExecutionResult {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-}
+/// Template embedded at compile time.
+const PYTHON_PRESCRIPT: &str = include_str!("../../../prescript.py");
 
-const LIB_PATH: &str = "/usr/local/share/sandbox";
-const PYTHON_PRESCRIPT: &str = include_str!("../../prescript.py");
-
-/// Python code runner.
-pub async fn run_python(
+pub async fn run(
     config: &Config,
     code_b64: &str,
     preload: &str,
@@ -30,8 +24,7 @@ pub async fn run_python(
         .map_err(|e| format!("base64 decode: {e}"))?;
 
     let key = crypto::generate_key(64);
-    let encoded_key =
-        base64::engine::general_purpose::STANDARD.encode(&key);
+    let encoded_key = base64::engine::general_purpose::STANDARD.encode(&key);
 
     let enable_net = if options.enable_network && config.enable_network {
         1
@@ -61,7 +54,7 @@ pub async fn run_python(
     let python_path = config.python_path.clone();
     let timeout_secs = config.worker_timeout;
 
-    let mut child = Command::new(&python_path)
+    let child = Command::new(&python_path)
         .arg(&code_path)
         .arg(LIB_PATH)
         .arg(&encoded_key)
@@ -86,14 +79,4 @@ pub async fn run_python(
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         exit_code: output.status.code().unwrap_or(-1),
     })
-}
-
-/// Node.js runner (stub).
-pub async fn run_nodejs(
-    _config: &Config,
-    _code_b64: &str,
-    _preload: &str,
-    _options: &RunnerOptions,
-) -> Result<ExecutionResult, String> {
-    Err("nodejs runner not yet implemented".into())
 }
