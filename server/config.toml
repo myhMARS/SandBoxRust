@@ -1,0 +1,21 @@
+[app]
+port = 8194
+debug = false
+key = "redbear-sandbox"
+
+max_workers = 4
+worker_timeout = 30
+
+enable_network = true
+enable_preload = false
+
+python_path = "/usr/bin/python3"
+
+sandbox_user = "sandbox"
+sandbox_uid = 65537
+sandbox_gid = 0
+
+[proxy]
+socks5 = ""
+http = ""
+https = ""
