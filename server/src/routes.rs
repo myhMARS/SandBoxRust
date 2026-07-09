@@ -35,12 +35,16 @@ pub async fn run_code(
             async move {
                 match req.language.as_str() {
                     "python3" => {
-                        services::run_python_code(&cfg, &req.code, &req.preload, &req.options)
-                            .await
+                        services::python::run_python_code(
+                            &cfg, &req.code, &req.preload, &req.options,
+                        )
+                        .await
                     }
                     "javascript" => {
-                        services::run_nodejs_code(&cfg, &req.code, &req.preload, &req.options)
-                            .await
+                        services::nodejs::run_nodejs_code(
+                            &cfg, &req.code, &req.preload, &req.options,
+                        )
+                        .await
                     }
                     _ => ApiResponse::error(400, "unsupported language"),
                 }
@@ -56,20 +60,26 @@ pub async fn run_code(
 
 pub async fn get_dependencies(
     query: web::Query<std::collections::HashMap<String, String>>,
+    config: web::Data<Config>,
     _api_key: ApiKey,
 ) -> HttpResponse {
     match query.get("language").map(String::as_str) {
-        Some("python3") => HttpResponse::Ok().json(services::list_python_dependencies().await),
+        Some("python3") => {
+            HttpResponse::Ok().json(services::python::list_python_dependencies(&config).await)
+        }
         _ => HttpResponse::Ok().json(ApiResponse::error(400, "unsupported language")),
     }
 }
 
 pub async fn update_dependencies(
     req: web::Json<UpdateDependencyRequest>,
+    config: web::Data<Config>,
     _api_key: ApiKey,
 ) -> HttpResponse {
     match req.language.as_str() {
-        "python3" => HttpResponse::Ok().json(services::update_python_dependencies().await),
+        "python3" => {
+            HttpResponse::Ok().json(services::python::update_python_dependencies(&config).await)
+        }
         _ => HttpResponse::Ok().json(ApiResponse::error(400, "unsupported language")),
     }
 }

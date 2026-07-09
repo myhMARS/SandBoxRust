@@ -1,4 +1,5 @@
-use crate::models::{ApiResponse, RunCodeData, RunnerOptions};
+use crate::dependencies;
+use crate::models::{ApiResponse, Dependency, RunCodeData, RunnerOptions};
 use crate::runners;
 
 pub async fn run_python_code(
@@ -9,23 +10,37 @@ pub async fn run_python_code(
 ) -> ApiResponse {
     match runners::python::run(config, code, preload, options).await {
         Ok(result) => {
-            if result.stderr.is_empty() || result.exit_code == 0 {
-                ApiResponse::success(RunCodeData {
-                    stdout: result.stdout,
-                    stderr: result.stderr,
-                })
-            } else {
-                ApiResponse::error(500, result.stderr)
+            // SIGSYS (seccomp violation) = signal 31
+            if result.exit_code == -31 {
+                return ApiResponse::error(31, "sandbox security policy violation");
             }
+            if !result.stderr.is_empty() && result.exit_code != 0 {
+                return ApiResponse::error(500, result.stderr);
+            }
+            ApiResponse::success(RunCodeData {
+                stdout: result.stdout,
+                stderr: result.stderr,
+            })
         }
         Err(e) => ApiResponse::error(500, e),
     }
 }
 
-pub async fn list_python_dependencies() -> ApiResponse {
-    ApiResponse::success(serde_json::json!({"dependencies": []}))
+pub async fn list_python_dependencies(config: &crate::config::Config) -> ApiResponse {
+    let packages = dependencies::list_python_packages(config).await;
+    let deps: Vec<Dependency> = packages
+        .into_iter()
+        .map(|p| Dependency {
+            name: p.name,
+            version: p.version,
+        })
+        .collect();
+    ApiResponse::success(serde_json::json!({ "dependencies": deps }))
 }
 
-pub async fn update_python_dependencies() -> ApiResponse {
-    ApiResponse::success(serde_json::json!({"success": true}))
+pub async fn update_python_dependencies(config: &crate::config::Config) -> ApiResponse {
+    match dependencies::install_python_dependencies(config).await {
+        Ok(()) => ApiResponse::success(serde_json::json!({"success": true})),
+        Err(e) => ApiResponse::error(500, e),
+    }
 }

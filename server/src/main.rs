@@ -1,5 +1,6 @@
 mod config;
 mod crypto;
+mod dependencies;
 mod middleware;
 mod models;
 mod queue;
@@ -31,10 +32,16 @@ async fn main() -> std::io::Result<()> {
     tracing::info!(
         port = port,
         max_workers = config.max_workers,
+        python_path = %config.python_path,
+        nodejs_path = %config.nodejs_path,
         "RedBear Sandbox starting (Rust)"
     );
 
-    // Clone for closure — HttpServer::new calls the factory Fn multiple times
+    // Install initial dependencies
+    if let Err(e) = crate::dependencies::install_python_dependencies(&config).await {
+        tracing::warn!("Failed to install initial Python dependencies: {e}");
+    }
+
     let cfg = config.clone();
     let q = queue.clone();
 

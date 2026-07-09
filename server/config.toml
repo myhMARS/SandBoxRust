@@ -10,6 +10,7 @@ enable_network = true
 enable_preload = false
 
 python_path = "/usr/bin/python3"
+nodejs_path = "/usr/bin/node"
 
 sandbox_user = "sandbox"
 sandbox_uid = 65537

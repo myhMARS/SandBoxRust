@@ -1,8 +1,6 @@
 pub mod python;
 pub mod nodejs;
 
-use crate::config::Config;
-use crate::models::RunnerOptions;
 
 /// Result of a code execution.
 pub struct ExecutionResult {

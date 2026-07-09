@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunCodeRequest {
     pub language: String,
-    pub code: String,        // base64-encoded
+    pub code: String,
     #[serde(default)]
     pub preload: String,
     #[serde(default)]
