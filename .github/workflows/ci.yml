@@ -14,11 +14,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install libseccomp
+
+      - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
-      - name: Build
-        run: cargo build --release
+
+      - name: Build server
+        run: cargo build --release -p redbear-sandbox
+
       - name: Test
-        run: cargo test
+        run: cargo test -p redbear-sandbox
+
       - name: Lint
-        run: cargo clippy -- -D warnings
+        run: cargo clippy -p redbear-sandbox -- -D warnings
+
+      - name: Build seccomp (python3)
+        run: cargo build --release -p seccomp_redbear --features python3
+
+      - name: Build seccomp (nodejs)
+        run: cargo build --release -p seccomp_redbear --features nodejs
