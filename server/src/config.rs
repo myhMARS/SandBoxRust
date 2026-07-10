@@ -49,11 +49,31 @@ pub struct Config {
     #[serde(default)]
     pub enable_preload: bool,
 
+    /// Use the pre-warmed zygote for Python execution instead of spawning a
+    /// fresh interpreter per request. Off by default; enable after validating
+    /// in a Linux container (fork/seccomp path is Linux-only).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub python_zygote: bool,
+
+    /// Modules imported once in the zygote at startup. Forked children
+    /// inherit them via copy-on-write, making `import json` etc. a cache hit
+    /// with no filesystem access or compilation.
+    #[serde(default = "default_zygote_modules")]
+    #[allow(dead_code)]
+    pub python_zygote_preload_modules: Vec<String>,
+
     #[serde(default = "default_python_path")]
     pub python_path: String,
 
     #[serde(default = "default_nodejs_path")]
     pub nodejs_path: String,
+
+    #[serde(default = "default_python_lib_paths")]
+    pub python_lib_paths: Vec<String>,
+
+    #[serde(default = "default_nodejs_lib_paths")]
+    pub nodejs_lib_paths: Vec<String>,
 
     #[serde(default)]
     #[allow(dead_code)]
@@ -72,9 +92,41 @@ pub struct Config {
 fn default_max_workers() -> usize { 4 }
 fn default_worker_timeout() -> u64 { 30 }
 fn default_true() -> bool { true }
-fn default_python_path() -> String { "/usr/bin/python3".into() }
+fn default_python_path() -> String { "/usr/local/bin/python3".into() }
 fn default_nodejs_path() -> String { "/usr/bin/node".into() }
+fn default_zygote_modules() -> Vec<String> {
+    vec![
+        "json", "re", "math", "datetime", "collections", "itertools",
+        "functools", "base64", "hashlib", "random", "decimal", "string", "orjson"
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
 fn default_sandbox_uid() -> u32 { 65537 }
+
+fn default_python_lib_paths() -> Vec<String> {
+    vec![
+        "/usr/local/lib/python3.12".into(),
+        "/usr/lib/python3".into(),
+        "/usr/lib/x86_64-linux-gnu".into(),
+        "/etc/ssl/certs/ca-certificates.crt".into(),
+        "/etc/nsswitch.conf".into(),
+        "/etc/hosts".into(),
+        "/etc/resolv.conf".into(),
+        "/etc/localtime".into(),
+    ]
+}
+
+fn default_nodejs_lib_paths() -> Vec<String> {
+    vec![
+        "/etc/ssl/certs/ca-certificates.crt".into(),
+        "/etc/nsswitch.conf".into(),
+        "/etc/resolv.conf".into(),
+        "/etc/hosts".into(),
+    ]
+}
 
 impl Config {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
@@ -99,6 +151,15 @@ impl Config {
         if let Ok(v) = std::env::var("NODEJS_PATH") { self.nodejs_path = v; }
         if let Ok(v) = std::env::var("ENABLE_NETWORK") {
             self.enable_network = matches!(v.as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("PYTHON_ZYGOTE") {
+            self.python_zygote = matches!(v.as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("PYTHON_LIB_PATH") {
+            self.python_lib_paths = v.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        if let Ok(v) = std::env::var("NODEJS_LIB_PATH") {
+            self.nodejs_lib_paths = v.split(',').map(|s| s.trim().to_string()).collect();
         }
     }
 }

@@ -14,7 +14,9 @@ pub struct RunCodeRequest {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RunnerOptions {
-    #[serde(default = "default_true")]
+    /// Enable network access for this execution. Defaults to `false` so
+    /// callers must opt in per-request (matched with `config.enable_network`).
+    #[serde(default)]
     pub enable_network: bool,
 }
 
@@ -62,4 +64,3 @@ impl ApiResponse {
     }
 }
 
-fn default_true() -> bool { true }

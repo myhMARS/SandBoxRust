@@ -1,5 +1,6 @@
 use actix_web::{web, FromRequest, HttpRequest};
 use std::future::{ready, Ready};
+use subtle::ConstantTimeEq;
 
 /// Extracts and validates the `X-Api-Key` header.
 ///
@@ -17,7 +18,13 @@ impl FromRequest for ApiKey {
             .expect("Config not in app_data");
 
         match req.headers().get("X-Api-Key").and_then(|v| v.to_str().ok()) {
-            Some(val) if val == config.app.key => ready(Ok(ApiKey(val.into()))),
+            // Constant-time comparison to avoid a timing side channel on the key.
+            // (Length may differ and short-circuits; the key length is not secret.)
+            Some(val)
+                if bool::from(val.as_bytes().ct_eq(config.app.key.as_bytes())) =>
+            {
+                ready(Ok(ApiKey(val.into())))
+            }
             _ => ready(Err(actix_web::error::ErrorUnauthorized(
                 r#"{"code":401,"message":"Invalid API key","data":null}"#,
             ))),

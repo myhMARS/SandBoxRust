@@ -1,6 +1,7 @@
 use crate::dependencies;
 use crate::models::{ApiResponse, Dependency, RunCodeData, RunnerOptions};
 use crate::runners;
+use super::is_seccomp_violation;
 
 pub async fn run_python_code(
     config: &crate::config::Config,
@@ -10,8 +11,7 @@ pub async fn run_python_code(
 ) -> ApiResponse {
     match runners::python::run(config, code, preload, options).await {
         Ok(result) => {
-            // SIGSYS (seccomp violation) = signal 31
-            if result.exit_code == -31 {
+            if is_seccomp_violation(result.exit_code) {
                 return ApiResponse::error(31, "sandbox security policy violation");
             }
             if !result.stderr.is_empty() && result.exit_code != 0 {

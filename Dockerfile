@@ -1,5 +1,5 @@
 # ── Stage 1: Build sandbox server ──
-FROM rust:1.88-slim-bookworm AS builder
+FROM rust:1.97-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libseccomp-dev && rm -rf /var/lib/apt/lists/*
@@ -16,7 +16,7 @@ COPY prescript.py prescript.js ./
 RUN cargo build --release -p redbear-sandbox
 
 # ── Stage 2: Build seccomp shared libs ──
-FROM rust:1.88-slim-bookworm AS seccomp
+FROM rust:1.97-slim-bookworm AS seccomp
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libseccomp-dev && rm -rf /var/lib/apt/lists/*
@@ -32,10 +32,10 @@ RUN cargo clean && \
     mv target/release/libsandbox.so /libnodejs.so
 
 # ── Stage 3: Runtime ──
-FROM debian:bookworm-slim
+FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip nodejs npm libseccomp2 ca-certificates curl && \
+    nodejs npm libseccomp2 ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
 # Seccomp shared libs (loaded at runtime by prescript)
@@ -50,6 +50,7 @@ COPY server/config.toml /etc/sandbox/config.toml
 COPY prescript.py prescript.js /usr/local/share/sandbox/
 COPY dependencies/ /usr/local/share/sandbox/dependencies/
 COPY script/ /usr/local/share/sandbox/script/
+COPY pool/ /usr/local/share/sandbox/pool/
 
 RUN mkdir -p /usr/local/share/sandbox/tmp && chmod 1777 /usr/local/share/sandbox/tmp
 

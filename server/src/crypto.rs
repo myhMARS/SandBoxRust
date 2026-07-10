@@ -1,5 +1,5 @@
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 
 /// XOR-encrypt code bytes with a repeating key, return base64-encoded ciphertext.
 pub fn encrypt_code(code: &[u8], key: &[u8]) -> String {
@@ -13,8 +13,9 @@ pub fn encrypt_code(code: &[u8], key: &[u8]) -> String {
 
 /// Generate a random encryption key of `length` bytes.
 pub fn generate_key(length: usize) -> Vec<u8> {
+    let mut rng = rand::rng();
     let mut key = vec![0u8; length];
-    rand::thread_rng().fill_bytes(&mut key);
+    rng.fill_bytes(&mut key);
     key
 }
 

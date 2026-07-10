@@ -25,13 +25,12 @@ pub async fn run_code(
 ) -> HttpResponse {
     let t_enqueue = Instant::now();
     let req = req.into_inner();
-    let cfg = config.get_ref().clone();
+    // Clone the `web::Data` handle (an Arc) rather than deep-cloning Config.
+    let cfg = config.clone();
     let language = req.language.clone();
 
     let result = queue
         .submit(language.clone(), move || {
-            let cfg = cfg.clone();
-            let req = req.clone();
             async move {
                 match req.language.as_str() {
                     "python3" => {

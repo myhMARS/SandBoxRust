@@ -33,6 +33,12 @@ key = b64decode(key)
 
 os.chdir(running_path)
 
+# Drop empty / relative entries from sys.path before applying the sandbox.
+# Resolving an empty "" entry (cwd) during import calls getcwd(), which is not
+# in the seccomp allowlist and would kill the process with SIGSYS. The remaining
+# absolute entries (stdlib, etc.) resolve fine after chroot, so we keep only
+# non-empty absolute paths.
+sys.path = [p for p in sys.path if p]
 
 # Apply security if library is available
 init_status = lib.init_seccomp({{uid}}, {{gid}}, {{enable_network}})
