@@ -46,17 +46,15 @@ jobs:
         run: cargo build --release -p redbear-sandbox
 
       - name: Build seccomp (python3)
-        run: cargo build --release -p seccomp_redbear --features python3
+        run: cargo build --release -p seccomp_redbear --features python3 && cp target/release/libsandbox.so /usr/local/share/sandbox/libpython.so
 
       - name: Build seccomp (nodejs)
-        run: cargo build --release -p seccomp_redbear --features nodejs
+        run: cargo build --release -p seccomp_redbear --features nodejs && cp target/release/libsandbox.so /usr/local/share/sandbox/libnodejs.so
 
       - name: Setup seccomp libs
         run: |
           mkdir -p /usr/local/share/sandbox/tmp
           chmod 1777 /usr/local/share/sandbox/tmp
-          cp target/release/libsandbox.so /usr/local/share/sandbox/libpython.so
-          cp target/release/libsandbox.so /usr/local/share/sandbox/libnodejs.so
           npm install --prefix /usr/local/share/sandbox koffi
 
       - name: Run integration tests
