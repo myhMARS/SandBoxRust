@@ -12,7 +12,7 @@ type Job = Box<
     dyn FnOnce() -> Pin<Box<dyn Future<Output = ApiResponse> + Send>> + Send + 'static,
 >;
 
-struct QueueMessage {
+pub(crate) struct QueueMessage {
     job: Job,
     respond: oneshot::Sender<ApiResponse>,
     enqueued_at: Instant,

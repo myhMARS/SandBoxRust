@@ -5,7 +5,7 @@ use std::future::{ready, Ready};
 ///
 /// Usage: add `ApiKey` as a handler parameter and it will be extracted
 /// by actix-web's type-safe extractor system (equivalent to FastAPI's `Depends`).
-pub struct ApiKey(pub String);
+pub struct ApiKey(#[allow(dead_code)] pub String);
 
 impl FromRequest for ApiKey {
     type Error = actix_web::Error;

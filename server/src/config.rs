@@ -6,6 +6,7 @@ use std::path::Path;
 pub struct AppConfig {
     pub port: u16,
     #[serde(default)]
+    #[allow(dead_code)]
     pub debug: bool,
     pub key: String,
 }
@@ -55,6 +56,7 @@ pub struct Config {
     pub nodejs_path: String,
 
     #[serde(default)]
+    #[allow(dead_code)]
     pub sandbox_user: String,
 
     #[serde(default = "default_sandbox_uid")]
