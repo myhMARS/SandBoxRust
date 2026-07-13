@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/myhMARS/SandBoxRust/actions"><img src="https://img.shields.io/github/actions/workflow/status/Eternity/SandBoxRust/ci.yml?branch=main" alt="CI"></a>
+  <a href="https://github.com/myhMARS/SandBoxRust/actions"><img src="https://img.shields.io/github/actions/workflow/status/myhMARS/SandBoxRust/ci.yml?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.97%2B-orange.svg" alt="Rust"></a>
 </p>
