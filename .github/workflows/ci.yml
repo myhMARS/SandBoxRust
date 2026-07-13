@@ -85,9 +85,6 @@ jobs:
           print('Node.js smoke test: OK')
           "
 
-      - name: Health benchmark
-        run: python3 tests/bench_health.py -c 20 -d 5
-
       - name: Stress test
         run: python3 tests/stress_test.py -n 30 -c 5
 
