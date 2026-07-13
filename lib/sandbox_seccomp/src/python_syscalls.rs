@@ -1,5 +1,3 @@
-// src/python_syscalls.rs
-
 pub static ALLOW_SYSCALLS: &[i32] = &[
     // File IO
     libc::SYS_read as i32,

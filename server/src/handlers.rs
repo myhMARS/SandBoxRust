@@ -3,12 +3,13 @@ use std::time::Instant;
 
 use crate::config::Config;
 use crate::middleware::ApiKey;
-use crate::models::{ApiResponse, Dependency, RunCodeData, RunCodeRequest, RunnerOptions, UpdateDependencyRequest};
+use crate::models::{ApiResponse, RunCodeData, RunCodeRequest, RunnerOptions};
 use crate::queue::QueueController;
 use crate::services;
+#[cfg(feature = "dependencies-api")]
+use crate::models::{Dependency, UpdateDependencyRequest};
+#[cfg(feature = "dependencies-api")]
 use crate::setup::dependencies;
-
-// ── Health ──
 
 pub async fn health(queue: web::Data<QueueController>) -> HttpResponse {
     let stats = &queue.stats;
@@ -19,8 +20,6 @@ pub async fn health(queue: web::Data<QueueController>) -> HttpResponse {
         "workers": stats.workers,
     }))
 }
-
-// ── Run code ──
 
 pub async fn run_code(
     req: web::Json<RunCodeRequest>,
@@ -51,8 +50,7 @@ pub async fn run_code(
     HttpResponse::Ok().json(result)
 }
 
-// ── Dependencies ──
-
+#[cfg(feature = "dependencies-api")]
 pub async fn get_dependencies(
     query: web::Query<std::collections::HashMap<String, String>>,
     config: web::Data<Config>,
@@ -71,6 +69,7 @@ pub async fn get_dependencies(
     }
 }
 
+#[cfg(feature = "dependencies-api")]
 pub async fn update_dependencies(
     req: web::Json<UpdateDependencyRequest>,
     config: web::Data<Config>,
@@ -86,8 +85,6 @@ pub async fn update_dependencies(
         _ => HttpResponse::Ok().json(ApiResponse::error(400, "unsupported language")),
     }
 }
-
-// ── Per-language runners (HTTP → sandbox adapter) ──
 
 async fn run_python(
     config: &Config,

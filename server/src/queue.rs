@@ -27,9 +27,7 @@ pub struct QueueStats {
 
 #[derive(Clone)]
 pub struct QueueController {
-    /// MPMC channel: every worker holds a clone of the receiver and pulls
-    /// directly, so there is no shared `Mutex` around a single-consumer
-    /// receiver (avoids the dequeue serialization/contention point).
+    /// MPMC channel: workers pull directly, no shared Mutex on the receiver.
     sender: async_channel::Sender<QueueMessage>,
     pub stats: Arc<QueueStats>,
 }
@@ -103,9 +101,7 @@ impl QueueController {
 mod tests {
     use super::*;
 
-    /// P9 regression: the MPMC queue must dispatch many concurrent jobs across
-    /// its worker pool and return each result, without the old shared-Mutex
-    /// receiver. Also sanity-checks queue_depth returns to zero.
+    /// MPMC queue dispatches concurrent jobs across workers; queue_depth returns to zero.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn queue_processes_concurrent_jobs() {
         let q = QueueController::start(4);

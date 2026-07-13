@@ -1,9 +1,4 @@
-//! Sandbox environment preparation — copies Python/Node.js standard libraries
-//! and system files into the chroot jail directory at startup, so they remain
-//! accessible after init_seccomp applies chroot(".").
-//!
-//! Mirrors `app/core/runners/python/env.py::prepare_python_dependencies_env()`
-//! from MemoryBear sandbox.
+//! Sandbox environment preparation — copies stdlib and system files into the chroot jail.
 
 use std::path::Path;
 
@@ -13,9 +8,6 @@ use crate::config::Config;
 use crate::services::LIB_PATH;
 
 /// Copy a source file or directory tree into the sandbox jail via `env.sh`.
-///
-/// `env.sh` creates hard links (falling back to copies) so the files exist
-/// under `LIB_PATH/<src>` after the call.
 async fn copy_into_jail(src: &str) -> Result<(), String> {
     let src_path = Path::new(src);
     if !src_path.exists() {
@@ -45,12 +37,8 @@ async fn copy_into_jail(src: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Prepare the sandbox environment by copying Python and Node.js library
-/// paths into the chroot jail directory.
-///
-/// Errors from individual paths are logged and skipped (matching the reference
-/// project's per-path error handling), so a missing optional path won't prevent
-/// the server from starting.
+/// Copy configured library paths into the chroot jail. Errors from individual
+/// paths are logged and skipped.
 pub async fn prepare_environment(config: &Config) {
     tracing::info!(
         python_path_count = config.python_lib_paths.len(),

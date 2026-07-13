@@ -49,16 +49,12 @@ pub struct Config {
     #[serde(default)]
     pub enable_preload: bool,
 
-    /// Use the pre-warmed zygote for Python execution instead of spawning a
-    /// fresh interpreter per request. Off by default; enable after validating
-    /// in a Linux container (fork/seccomp path is Linux-only).
+    /// Use pre-warmed zygote for Python (Linux-only: fork + seccomp).
     #[serde(default)]
     #[allow(dead_code)]
     pub python_zygote: bool,
 
-    /// Modules imported once in the zygote at startup. Forked children
-    /// inherit them via copy-on-write, making `import json` etc. a cache hit
-    /// with no filesystem access or compilation.
+    /// Modules pre-imported in the zygote at startup (inherited via COW).
     #[serde(default = "default_zygote_modules")]
     #[allow(dead_code)]
     pub python_zygote_preload_modules: Vec<String>,
@@ -85,11 +81,7 @@ pub struct Config {
     #[serde(default = "default_sandbox_gid")]
     pub sandbox_gid: u32,
 
-    /// Per-request virtual address space cap (RLIMIT_AS) in bytes, passed into
-    /// init_seccomp. Bounds a single execution's memory so a runaway
-    /// allocation fails cleanly instead of exhausting host memory. `0`
-    /// disables. Node needs a higher value than Python (V8 reserves ~700MB of
-    /// virtual space just to start).
+    /// Per-request address space cap in bytes (RLIMIT_AS). 0 disables.
     #[serde(default = "default_python_max_as_bytes")]
     pub python_max_as_bytes: u64,
 
@@ -117,8 +109,7 @@ fn default_zygote_modules() -> Vec<String> {
 
 fn default_sandbox_uid() -> u32 { 65537 }
 
-/// Dedicated non-privileged group. Never 0 — running the sandbox with the root
-/// group (gid 0) would grant access to group-root-owned files.
+/// Non-root group. Never 0.
 fn default_sandbox_gid() -> u32 { 65537 }
 
 fn default_python_max_as_bytes() -> u64 { 1024 * 1024 * 1024 } // 1 GiB

@@ -1,6 +1,4 @@
 //! Dependency management — pip list, pip install via subprocess.
-//!
-//! Mirrors `app/dependencies.py` from MemoryBear sandbox.
 
 use std::process::Stdio;
 
@@ -10,12 +8,14 @@ use crate::config::Config;
 use crate::services::LIB_PATH;
 
 #[derive(Debug, serde::Serialize)]
+#[cfg_attr(not(feature = "dependencies-api"), allow(dead_code))]
 pub struct Package {
     pub name: String,
     pub version: String,
 }
 
 /// List installed Python packages via `pip list --format=freeze`.
+#[cfg(feature = "dependencies-api")]
 pub async fn list_python_packages(config: &Config) -> Vec<Package> {
     let result = Command::new(&config.python_path)
         .args(["-m", "pip", "list", "--format=freeze"])

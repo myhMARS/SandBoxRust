@@ -1,8 +1,4 @@
-//! Pre-warmed Python zygote pool — spawns a Python worker process that
-//! pre-imports common modules and fork()s children per request, avoiding
-//! per-request interpreter cold start.
-//!
-//! Modeled after `app/core/pool/zygote_manager.py` from MemoryBear sandbox.
+//! Pre-warmed Python zygote pool — avoids per-request interpreter cold start.
 
 use std::collections::HashMap;
 use std::io;
@@ -29,7 +25,7 @@ fn socketpair() -> io::Result<(i32, i32)> {
     Ok((fds[0], fds[1]))
 }
 
-// ── Wire protocol (shared with pool/protocol.py) ──
+// Wire protocol (shared with pool/protocol.py).
 
 const HEADER_SIZE: usize = 9;
 const MSG_RUN: u8 = 1;
@@ -53,8 +49,6 @@ struct Pending {
     err: Vec<u8>,
     tx: Option<oneshot::Sender<(String, String, i32)>>,
 }
-
-// ── Zygote manager ──
 
 pub struct ZygoteManager {
     /// Only the write half is shared/locked. The read half is owned
@@ -125,16 +119,11 @@ impl ZygoteManager {
         })
     }
 
-    /// Returns true if the zygote worker is alive and connected.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Execute code in the pre-warmed zygote.
-    ///
-    /// Returns `(stdout, stderr, exit_code)`. If the worker has died,
-    /// returns an error string in stderr with exit_code = -1 so the
-    /// caller can fall back to the slow path.
+    /// Execute code in the pre-warmed zygote. Returns `(stdout, stderr, exit_code)`.
     pub async fn run(
         &self,
         code_b64: &str,
@@ -218,8 +207,6 @@ impl Drop for ZygoteManager {
     }
 }
 
-// ── Background reader ──
-
 /// Per-request output cap (stdout + stderr). A child exceeding it is killed and
 /// its request fails, so a runaway `print` loop cannot make the manager buffer
 /// unbounded output into memory (OOM). Override via `ZYGOTE_MAX_OUTPUT_BYTES`.
@@ -261,9 +248,7 @@ async fn read_loop(
                 frame_buf[5], frame_buf[6], frame_buf[7], frame_buf[8],
             ]);
 
-            // Sanity cap: a single frame larger than the whole per-request
-            // budget signals a corrupt/hostile stream. Close the reader rather
-            // than let frame_buf grow to `plen`.
+            // Oversized frame → corrupt/hostile stream; close reader.
             if plen > max_output {
                 tracing::error!(plen, max_output, "zygote: oversized frame; closing reader");
                 break 'read;
@@ -276,10 +261,7 @@ async fn read_loop(
             let payload = frame_buf[HEADER_SIZE..HEADER_SIZE + plen].to_vec();
             frame_buf.drain(..HEADER_SIZE + plen);
 
-            // Apply the frame under the pending lock; if this request blew its
-            // output budget, note it and KILL the child *after* releasing the
-            // lock (run() may hold write_half while touching pending, so we
-            // must never hold pending across a write_half lock here).
+            // Must release pending lock before acquiring write_half (lock ordering).
             let mut kill_req: Option<u32> = None;
             {
                 let mut pending_map = pending.lock().await;
@@ -304,7 +286,6 @@ async fn read_loop(
                         _ => {}
                     }
 
-                    // Enforce the per-request output cap (stdout + stderr).
                     if matches!(mtype, MSG_STDOUT | MSG_STDERR)
                         && entry.out.len() + entry.err.len() > max_output
                     {
@@ -318,8 +299,6 @@ async fn read_loop(
                                 -1,
                             ));
                         }
-                        // Free the buffered output now and ignore further frames
-                        // for this request.
                         pending_map.remove(&req_id);
                         kill_req = Some(req_id);
                     }
@@ -350,9 +329,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// A request whose combined stdout+stderr exceeds the per-request cap must
-    /// be failed with an "output limit exceeded" error AND the child must be
-    /// killed (a MSG_KILL frame sent back to the worker). This is the OOM guard.
+    /// Per-request output cap: child exceeding it is killed (OOM guard).
     #[tokio::test]
     async fn per_request_output_cap_kills_child() {
         let (worker, server) = UnixStream::pair().unwrap();
@@ -398,7 +375,7 @@ mod tests {
         assert_eq!(hdr[4], MSG_KILL, "expected MSG_KILL frame");
         assert_eq!(u32::from_be_bytes([hdr[5], hdr[6], hdr[7], hdr[8]]), 7);
 
-        // The over-limit request's buffer was freed (entry removed).
+        // Over-limit request's buffer was freed.
         assert!(pending.lock().await.get(&7).is_none());
 
         task.abort();
@@ -413,18 +390,7 @@ mod tests {
         assert_eq!(max_output_bytes(), DEFAULT_MAX_OUTPUT_BYTES);
     }
 
-    /// Regression test for C1 (zygote deadlock).
-    ///
-    /// The original design wrapped the whole `UnixStream` in a single
-    /// `Mutex` and held the guard across `read().await` in the reader loop.
-    /// That prevented `run()` from ever acquiring the lock to send a RUN
-    /// frame while the reader was parked waiting for data — a hard deadlock
-    /// on the very first request.
-    ///
-    /// This test reproduces that exact I/O shape with the fixed `into_split`
-    /// design: a reader parked in `read().await` on the read half must NOT
-    /// block a concurrent writer on the write half. It also exercises a full
-    /// round trip. Needs no root / chroot, so it runs anywhere.
+    /// Regression: reader parked in read().await must not block concurrent writes (C1 deadlock).
     #[tokio::test]
     async fn split_stream_read_does_not_block_write() {
         let (a, b) = UnixStream::pair().unwrap();
@@ -441,8 +407,7 @@ mod tests {
         // Let the reader actually enter read().await before we write.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // While the reader is parked, the write half must remain usable.
-        // (Under the old shared-Mutex design this write could never proceed.)
+        // While reader is parked, write half must remain usable.
         a_wr.write_all(b"ping").await.unwrap();
         let mut pbuf = [0u8; 4];
         b_rd.read_exact(&mut pbuf).await.unwrap();

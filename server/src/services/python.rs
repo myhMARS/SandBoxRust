@@ -13,10 +13,7 @@ use crate::models::RunnerOptions;
 /// Template embedded at compile time.
 const PYTHON_PRESCRIPT: &str = include_str!("../../../runtime/prescript.py");
 
-/// Build the sandbox script and encryption key in memory (no temp file).
-/// The script is fed to Python via stdin (`python -B -`), so the
-/// interpreter reads and compiles it before embedded init_seccomp()
-/// applies chroot/seccomp.
+/// Build sandbox script and encryption key in memory.
 fn build_script(
     config: &Config,
     code: &[u8],
@@ -59,8 +56,7 @@ pub async fn run(
     let checked_preload = if config.enable_preload { preload } else { "" };
     let timeout_secs = config.worker_timeout;
 
-    // ── Fast path: pre-warmed zygote (avoids interpreter cold start) ──
-    // Unix-only: zygote relies on fork() + seccomp.
+    // Fast path: pre-warmed zygote (Unix-only: fork() + seccomp).
     #[cfg(unix)]
     if config.python_zygote && checked_preload.is_empty() {
         if let Some(zygote) = crate::get_zygote() {
@@ -96,7 +92,7 @@ pub async fn run(
         }
     }
 
-    // ── Slow path: fresh interpreter via stdin ──
+    // Slow path: fresh interpreter via stdin.
     let (script, encoded_key) = build_script(config, &code, checked_preload, options);
     let script_bytes = script.into_bytes();
 

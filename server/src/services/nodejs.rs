@@ -10,15 +10,7 @@ use crate::models::RunnerOptions;
 
 const NODEJS_PRESCRIPT: &str = include_str!("../../../runtime/prescript.js");
 
-/// Validate that `code_b64` is well-formed base64 and return its canonical
-/// re-encoding.
-///
-/// This mirrors the Python runner, which decodes (and thereby validates) the
-/// incoming code up front. It closes the JS string-injection surface in
-/// `build_script`: the base64 alphabet cannot contain a `'`, backslash or
-/// newline, so a validated/canonical string can never break out of the
-/// `eval(Buffer.from('...', 'base64'))` string literal. Re-encoding also
-/// strips any decoder leniency by emitting a purely canonical alphabet.
+/// Validate base64 and return canonical re-encoding (closes JS string-injection surface).
 fn validate_base64(code_b64: &str) -> Result<String, String> {
     use base64::Engine;
     let decoded = base64::engine::general_purpose::STANDARD
@@ -27,18 +19,12 @@ fn validate_base64(code_b64: &str) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(decoded))
 }
 
-/// Build the sandbox script in memory (no temp file).
-/// The script is fed to Node.js via stdin (`node -`), so node reads and
-/// compiles it before embedded init_seccomp() applies chroot/seccomp.
-///
-/// `code_b64` MUST already be validated base64 (see [`validate_base64`]);
-/// callers pass the canonical form so the splice below cannot be escaped.
+/// Build sandbox script in memory. `code_b64` must already be validated.
 fn build_script(
     code_b64: &str,
     preload: &str,
 ) -> String {
-    let checked_preload = preload; // enable_preload check is done in run()
-    let mut script = NODEJS_PRESCRIPT.replace("{{preload}}", checked_preload);
+    let mut script = NODEJS_PRESCRIPT.replace("{{preload}}", preload);
     let eval_code = format!(
         "eval(Buffer.from('{}', 'base64').toString('utf-8'))",
         code_b64

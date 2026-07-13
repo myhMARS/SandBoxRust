@@ -56,7 +56,6 @@ fn try_begin_restart() -> bool {
         .is_ok()
 }
 
-/// Release the single-flight restart gate.
 #[cfg(unix)]
 fn end_restart() {
     ZYGOTE_RESTARTING.store(false, std::sync::atomic::Ordering::Release);
@@ -166,7 +165,6 @@ async fn main() -> std::io::Result<()> {
         "Sandbox flags"
     );
 
-    // Install initial dependencies
     if let Err(e) = crate::setup::dependencies::install_python_dependencies(&config).await {
         tracing::warn!("Failed to install initial Python dependencies: {e}");
     }
@@ -174,8 +172,7 @@ async fn main() -> std::io::Result<()> {
     // Prepare sandbox environment (stdlib, system libs into chroot jail)
     crate::setup::env::prepare_environment(&config).await;
 
-    // Start pre-warmed Python zygote (if enabled) for fast cold-start.
-    // Unix-only: requires fork() + seccomp, which are Linux features.
+    // Unix-only: requires fork() + seccomp.
     #[cfg(unix)]
     if config.python_zygote {
         tracing::info!(
@@ -215,19 +212,26 @@ async fn main() -> std::io::Result<()> {
     let q = queue.clone();
 
     HttpServer::new(move || {
+        let scope = {
+            let s = web::scope("/v1/sandbox")
+                .route("/run", web::post().to(handlers::run_code));
+
+            #[cfg(feature = "dependencies-api")]
+            let s = s
+                .route("/dependencies", web::get().to(handlers::get_dependencies))
+                .route(
+                    "/dependencies/update",
+                    web::post().to(handlers::update_dependencies),
+                );
+
+            s
+        };
+
         App::new()
             .app_data(web::Data::new(cfg.clone()))
             .app_data(web::Data::new(q.clone()))
             .route("/health", web::get().to(handlers::health))
-            .service(
-                web::scope("/v1/sandbox")
-                    .route("/run", web::post().to(handlers::run_code))
-                    .route("/dependencies", web::get().to(handlers::get_dependencies))
-                    .route(
-                        "/dependencies/update",
-                        web::post().to(handlers::update_dependencies),
-                    ),
-            )
+            .service(scope)
     })
     .bind(("0.0.0.0", port))?
     .run()
@@ -241,9 +245,6 @@ mod restart_gate_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    /// Under concurrent contention, exactly one caller wins the single-flight
-    /// gate — proving many requests observing a dead zygote cannot trigger a
-    /// thundering herd of restarts.
     #[test]
     fn single_flight_admits_exactly_one() {
         // Ensure a clean gate (other logic never runs in tests).

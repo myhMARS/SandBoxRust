@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-// ── Request models ──
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunCodeRequest {
     pub language: String,
@@ -21,11 +19,10 @@ pub struct RunnerOptions {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(not(feature = "dependencies-api"), allow(dead_code))]
 pub struct UpdateDependencyRequest {
     pub language: String,
 }
-
-// ── Response models ──
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiResponse {
@@ -41,6 +38,7 @@ pub struct RunCodeData {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(not(feature = "dependencies-api"), allow(dead_code))]
 pub struct Dependency {
     pub name: String,
     pub version: String,

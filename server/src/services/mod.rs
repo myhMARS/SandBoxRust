@@ -30,9 +30,7 @@ pub fn exit_code_from_status(status: ExitStatus) -> i32 {
     status.code().unwrap_or(-1)
 }
 
-// ── Seccomp violation detection ──
-
-/// Process-was-killed-by-SIGSYS sentinel values.
+// SIGSYS sentinel values (signal 31).
 /// SIGSYS = signal 31; raw wait status = 128 + 31 = 159; negative-signal = -31.
 pub(crate) const SIGSYS_RAW: i32 = 159;
 pub(crate) const SIGSYS_NEG: i32 = -31;

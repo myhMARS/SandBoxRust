@@ -2,10 +2,7 @@ use actix_web::{web, error::InternalError, FromRequest, HttpRequest, HttpRespons
 use std::future::{ready, Ready};
 use subtle::ConstantTimeEq;
 
-/// Extracts and validates the `X-Api-Key` header.
-///
-/// Usage: add `ApiKey` as a handler parameter and it will be extracted
-/// by actix-web's type-safe extractor system (equivalent to FastAPI's `Depends`).
+/// Extracts and validates the `X-Api-Key` header (actix-web extractor).
 pub struct ApiKey(#[allow(dead_code)] pub String);
 
 impl FromRequest for ApiKey {
