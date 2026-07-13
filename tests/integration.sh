@@ -7,15 +7,15 @@ pass() { echo -e "${GREEN}PASS${NC} $1"; }
 fail() { echo -e "${RED}FAIL${NC} $1"; exit 1; }
 
 CONFIG_PATH="${CONFIG_PATH:-server/config.toml}"
-API_KEY="${API_KEY:-redbear-sandbox}"
+API_KEY="${API_KEY:-sandbox-server}"
 BASE="http://127.0.0.1:8194"
 HEADER="-H X-Api-Key:$API_KEY"
 CT="-H Content-Type:application/json"
 
 # ── Start server ──
 echo "=== Starting sandbox server ==="
-cargo build --release -p redbear-sandbox 2>&1 | tail -1
-./target/release/redbear-sandbox &
+cargo build --release -p sandbox-server 2>&1 | tail -1
+./target/release/sandbox-server &
 PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 

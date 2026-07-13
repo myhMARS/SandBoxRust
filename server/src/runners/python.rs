@@ -38,6 +38,7 @@ fn build_script(
         .replace("{{uid}}", &config.sandbox_uid.to_string())
         .replace("{{gid}}", &config.sandbox_gid.to_string())
         .replace("{{enable_network}}", &enable_net.to_string())
+        .replace("{{max_as}}", &config.python_max_as_bytes.to_string())
         .replace("{{preload}}", &format!("{checked_preload}\n"));
     let encoded_code = crypto::encrypt_code(code, &key);
     script = script.replace("{{code}}", &encoded_code);
@@ -76,6 +77,7 @@ pub async fn run(
                         config.sandbox_uid,
                         config.sandbox_gid,
                         net,
+                        config.python_max_as_bytes,
                         Duration::from_secs(timeout_secs),
                     )
                     .await;
@@ -86,12 +88,11 @@ pub async fn run(
                     exit_code,
                 });
             }
-            // Zygote died — fall through to slow path, restart in background.
+            // Zygote died — fall through to the slow path and request a
+            // restart. Single-flight inside request_zygote_restart prevents a
+            // thundering herd when many concurrent requests see it dead.
             drop(zygote);
-            let cfg = config.clone();
-            tokio::spawn(async move {
-                crate::try_restart_zygote(&cfg).await;
-            });
+            crate::request_zygote_restart(config);
         }
     }
 

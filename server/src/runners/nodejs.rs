@@ -10,9 +10,29 @@ use crate::models::RunnerOptions;
 
 const NODEJS_PRESCRIPT: &str = include_str!("../../../prescript.js");
 
+/// Validate that `code_b64` is well-formed base64 and return its canonical
+/// re-encoding.
+///
+/// This mirrors the Python runner, which decodes (and thereby validates) the
+/// incoming code up front. It closes the JS string-injection surface in
+/// `build_script`: the base64 alphabet cannot contain a `'`, backslash or
+/// newline, so a validated/canonical string can never break out of the
+/// `eval(Buffer.from('...', 'base64'))` string literal. Re-encoding also
+/// strips any decoder leniency by emitting a purely canonical alphabet.
+fn validate_base64(code_b64: &str) -> Result<String, String> {
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(code_b64)
+        .map_err(|e| format!("invalid base64 code: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(decoded))
+}
+
 /// Build the sandbox script in memory (no temp file).
 /// The script is fed to Node.js via stdin (`node -`), so node reads and
 /// compiles it before embedded init_seccomp() applies chroot/seccomp.
+///
+/// `code_b64` MUST already be validated base64 (see [`validate_base64`]);
+/// callers pass the canonical form so the splice below cannot be escaped.
 fn build_script(
     code_b64: &str,
     preload: &str,
@@ -37,7 +57,12 @@ pub async fn run(
     let enable_network = options.enable_network && config.enable_network;
     let timeout_secs = config.worker_timeout;
 
-    let script = build_script(code_b64, checked_preload);
+    // Validate the incoming code is well-formed base64 BEFORE it is spliced
+    // into the JS template — consistent with the Python runner and closing the
+    // string-injection surface in build_script.
+    let code_b64 = validate_base64(code_b64)?;
+
+    let script = build_script(&code_b64, checked_preload);
     let script_bytes = script.into_bytes();
 
     let nodejs_path = config.nodejs_path.clone();
@@ -46,8 +71,8 @@ pub async fn run(
 
     // Build options JSON string for the prescript
     let opts_json = format!(
-        r#"{{"enable_network":{}}}"#,
-        enable_network
+        r#"{{"enable_network":{},"max_as":{}}}"#,
+        enable_network, config.nodejs_max_as_bytes
     );
 
     // `node -` — feed the script via stdin (no temp file).
@@ -74,7 +99,15 @@ pub async fn run(
         }
     }
 
-    cmd.arg("-")
+    // Cap V8's JS heap so JS-object bombs die with a clean heap-OOM below the
+    // RLIMIT_AS ceiling. Override with NODE_MAX_OLD_SPACE_MB.
+    let old_space_mb = std::env::var("NODE_MAX_OLD_SPACE_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(768);
+    cmd.arg(format!("--max-old-space-size={old_space_mb}"))
+        .arg("-")
         .arg(LIB_PATH)
         .arg(sandbox_uid.to_string())
         .arg(sandbox_gid.to_string())
@@ -112,4 +145,68 @@ pub async fn run(
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         exit_code: super::exit_code_from_status(output.status),
     })
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    fn b64(s: &str) -> String {
+        base64::engine::general_purpose::STANDARD.encode(s)
+    }
+
+    /// C1 injection surface: if raw (unvalidated) input reached `build_script`,
+    /// a payload containing a quote would break out of the JS string literal.
+    /// This documents exactly what `validate_base64` prevents from ever
+    /// arriving at `build_script`.
+    #[test]
+    fn build_script_splices_raw_code_verbatim() {
+        let payload = "'); globalThis.PWNED=1; //";
+        let script = build_script(payload, "");
+        // The quote is spliced verbatim -> broken-out injection.
+        assert!(script.contains("globalThis.PWNED=1"));
+        assert!(script.contains("eval(Buffer.from('');"));
+    }
+
+    /// The classic breakout PoC is not valid base64, so validation rejects it
+    /// before it can reach `build_script`.
+    #[test]
+    fn validate_rejects_injection_payload() {
+        let payload = "'); require('child_process').execSync('id'); //";
+        assert!(validate_base64(payload).is_err());
+    }
+
+    /// Any quote/backslash/newline breaks the base64 alphabet -> rejected.
+    #[test]
+    fn validate_rejects_quote_and_control_chars() {
+        assert!(validate_base64("abc'def").is_err());
+        assert!(validate_base64("abc\\def").is_err());
+        assert!(validate_base64("abc\ndef").is_err());
+    }
+
+    /// Legit base64 is accepted and round-trips to the original source.
+    #[test]
+    fn validate_accepts_valid_base64() {
+        let src = "console.log('hi')";
+        let canonical = validate_base64(&b64(src)).expect("valid base64");
+        let back = base64::engine::general_purpose::STANDARD
+            .decode(&canonical)
+            .unwrap();
+        assert_eq!(back, src.as_bytes());
+    }
+
+    /// After validation, whatever `build_script` embeds is pure base64
+    /// alphabet, so the resulting eval wrapper is well-formed and unbreakable.
+    #[test]
+    fn validated_code_produces_safe_wrapper() {
+        let canonical = validate_base64(&b64("1+1")).unwrap();
+        let script = build_script(&canonical, "");
+        let expected = format!("eval(Buffer.from('{canonical}', 'base64').toString('utf-8'))");
+        assert!(script.contains(&expected));
+        // No stray quote could have been introduced.
+        assert!(!canonical.contains('\''));
+    }
 }

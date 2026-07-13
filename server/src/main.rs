@@ -36,43 +36,97 @@ static ZYGOTE: RwLock<Option<Arc<ZygoteManager>>> = RwLock::new(None);
 /// `.await` points without making their future `!Send`.
 #[cfg(unix)]
 pub(crate) fn get_zygote() -> Option<Arc<ZygoteManager>> {
-    let guard = ZYGOTE.read().ok()?;
+    // Recover from a poisoned lock rather than disabling the zygote path: the
+    // guarded value is only ever fully replaced, so even a poisoned state
+    // still holds a valid Option.
+    let guard = ZYGOTE.read().unwrap_or_else(|e| e.into_inner());
     guard.as_ref().cloned()
+}
+
+/// Guards against a thundering herd of restarts: only one restart task runs
+/// at a time. Many concurrent requests can observe the zygote as dead, but
+/// only the first triggers an actual restart.
+#[cfg(unix)]
+static ZYGOTE_RESTARTING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Try to become the single in-flight restarter. Returns true for exactly one
+/// caller until [`end_restart`] is called. Isolated for unit testing.
+#[cfg(unix)]
+fn try_begin_restart() -> bool {
+    use std::sync::atomic::Ordering;
+    ZYGOTE_RESTARTING
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+}
+
+/// Release the single-flight restart gate.
+#[cfg(unix)]
+fn end_restart() {
+    ZYGOTE_RESTARTING.store(false, std::sync::atomic::Ordering::Release);
+}
+
+/// Request a zygote restart in the background (single-flight, non-blocking).
+///
+/// Safe to call from every request that just saw the zygote die: the atomic
+/// gate ensures at most one restart task is in flight, so we never spawn a
+/// storm of tasks all contending on the same lock / all spawning interpreters.
+#[cfg(unix)]
+pub(crate) fn request_zygote_restart(config: &Config) {
+    if !try_begin_restart() {
+        return; // a restart is already in progress
+    }
+    let cfg = config.clone();
+    tokio::spawn(async move {
+        let _ = try_restart_zygote(&cfg).await;
+        end_restart();
+    });
 }
 
 /// Attempt to restart the zygote worker. Called after a connection loss
 /// is detected. Returns true if restart succeeded.
+///
+/// The new interpreter is built WITHOUT holding the `ZYGOTE` lock — spawning a
+/// process is slow, and holding a `std` write lock across it would block every
+/// other reader/writer (and any tokio worker thread that touches the lock).
+/// The write lock is taken only briefly to swap the ready manager in.
 #[cfg(unix)]
 pub(crate) async fn try_restart_zygote(config: &Config) -> bool {
-    let mut guard = match ZYGOTE.write() {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
-    // Already running?
-    if let Some(ref z) = *guard {
+    // Already back up? (Cheap read-lock check before the expensive spawn.)
+    if let Some(z) = get_zygote() {
         if z.is_running() {
             return true;
         }
     }
-    // Kill old and start new.
-    *guard = None;
-    match ZygoteManager::new(
+
+    // Build the replacement outside any lock.
+    let new_z = match ZygoteManager::new(
         &config.python_path,
         "./libpython.so",
         LIB_PATH,
         &config.python_zygote_preload_modules,
     ) {
-        Ok(new_z) => {
-            tracing::info!(modules = ?config.python_zygote_preload_modules,
-                           "Python zygote pool restarted");
-            *guard = Some(Arc::new(new_z));
-            true
-        }
+        Ok(z) => z,
         Err(e) => {
             tracing::error!("Failed to restart zygote: {e}");
-            false
+            return false;
+        }
+    };
+
+    // Swap it in under a brief write lock (recovering from poison so a prior
+    // panic can't permanently wedge restarts).
+    let mut guard = ZYGOTE.write().unwrap_or_else(|e| e.into_inner());
+    // A concurrent restart may have already installed a live one.
+    if let Some(ref z) = *guard {
+        if z.is_running() {
+            return true; // `new_z` dropped here (its child is killed)
         }
     }
+    tracing::info!("Python zygote pool restarted");
+    tracing::debug!(modules = ?config.python_zygote_preload_modules,
+                    "Python zygote restarted with modules");
+    *guard = Some(Arc::new(new_z));
+    true
 }
 
 // Non-Unix stub.
@@ -100,15 +154,20 @@ async fn main() -> std::io::Result<()> {
         port = port,
         max_workers = config.max_workers,
         worker_timeout = config.worker_timeout,
-        python_path = %config.python_path,
-        nodejs_path = %config.nodejs_path,
-        "RedBear Sandbox starting (Rust)"
+        "Sandbox server starting"
     );
     tracing::info!(
-        python_zygote = config.python_zygote,
-        enable_preload = config.enable_preload,
-        enable_network = config.enable_network,
-        "Sandbox runtime flags"
+        python = %config.python_path,
+        nodejs = %config.nodejs_path,
+        "Runtime paths"
+    );
+    tracing::info!(
+        zygote = config.python_zygote,
+        network = config.enable_network,
+        preload = config.enable_preload,
+        python_max_as_mb = config.python_max_as_bytes / 1048576,
+        nodejs_max_as_mb = config.nodejs_max_as_bytes / 1048576,
+        "Sandbox flags"
     );
 
     // Install initial dependencies
@@ -125,8 +184,12 @@ async fn main() -> std::io::Result<()> {
     if config.python_zygote {
         tracing::info!(
             count = config.python_zygote_preload_modules.len(),
-            modules = ?config.python_zygote_preload_modules,
             "Starting Python zygote with preloaded stdlib modules"
+        );
+        tracing::debug!(
+            count = config.python_zygote_preload_modules.len(),
+            modules = ?config.python_zygote_preload_modules,
+            "Python zygote preload module details"
         );
         match ZygoteManager::new(
             &config.python_path,
@@ -135,11 +198,9 @@ async fn main() -> std::io::Result<()> {
             &config.python_zygote_preload_modules,
         ) {
             Ok(zygote) => {
-                tracing::info!(
-                    modules = ?config.python_zygote_preload_modules,
-                    "Python zygote pool started"
-                );
-                *ZYGOTE.write().unwrap() = Some(Arc::new(zygote));
+                tracing::info!("Python zygote pool started");
+                *ZYGOTE.write().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Arc::new(zygote));
             }
             Err(e) => {
                 tracing::error!("Failed to start Python zygote: {e}");
@@ -151,6 +212,8 @@ async fn main() -> std::io::Result<()> {
         #[cfg(not(unix))]
         tracing::info!("Python zygote not available on this platform");
     }
+
+    tracing::info!("Startup complete — Sandbox is ready to accept requests");
 
     let cfg = config.clone();
     let q = queue.clone();
@@ -173,4 +236,45 @@ async fn main() -> std::io::Result<()> {
     .bind(("0.0.0.0", port))?
     .run()
     .await
+}
+
+
+#[cfg(all(test, unix))]
+mod restart_gate_tests {
+    use super::{end_restart, try_begin_restart};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Under concurrent contention, exactly one caller wins the single-flight
+    /// gate — proving many requests observing a dead zygote cannot trigger a
+    /// thundering herd of restarts.
+    #[test]
+    fn single_flight_admits_exactly_one() {
+        // Ensure a clean gate (other logic never runs in tests).
+        end_restart();
+
+        let winners = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let winners = Arc::clone(&winners);
+            handles.push(std::thread::spawn(move || {
+                if try_begin_restart() {
+                    winners.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            winners.load(Ordering::SeqCst),
+            1,
+            "exactly one caller must win the restart gate"
+        );
+
+        // Releasing the gate lets a subsequent restart begin.
+        end_restart();
+        assert!(try_begin_restart(), "gate should be reusable after release");
+        end_restart();
+    }
 }

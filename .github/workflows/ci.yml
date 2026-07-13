@@ -19,19 +19,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
 
       - name: Build server
-        run: cargo build --release -p redbear-sandbox
+        run: cargo build --release -p sandbox-server
 
       - name: Test (unit)
-        run: cargo test -p redbear-sandbox
+        run: cargo test -p sandbox-server
 
       - name: Lint
-        run: cargo clippy -p redbear-sandbox -- -D warnings
+        run: cargo clippy -p sandbox-server -- -D warnings
 
       - name: Build seccomp (python3)
-        run: cargo build --release -p seccomp_redbear --features python3
+        run: cargo build --release -p sandbox_seccomp --features python3
 
       - name: Build seccomp (nodejs)
-        run: cargo build --release -p seccomp_redbear --features nodejs
+        run: cargo build --release -p sandbox_seccomp --features nodejs
 
   integration:
     runs-on: ubuntu-latest
@@ -43,15 +43,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libseccomp-dev python3 nodejs npm
 
       - name: Build server
-        run: cargo build --release -p redbear-sandbox
+        run: cargo build --release -p sandbox-server
 
       - name: Build and setup seccomp libs
         run: |
           sudo mkdir -p /usr/local/share/sandbox/tmp
           sudo chmod 1777 /usr/local/share/sandbox/tmp
-          cargo build --release -p seccomp_redbear --features python3
+          cargo build --release -p sandbox_seccomp --features python3
           sudo cp target/release/libsandbox.so /usr/local/share/sandbox/libpython.so
-          cargo build --release -p seccomp_redbear --features nodejs
+          cargo build --release -p sandbox_seccomp --features nodejs
           sudo cp target/release/libsandbox.so /usr/local/share/sandbox/libnodejs.so
           sudo npm install --prefix /usr/local/share/sandbox koffi
 

@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
-members = ["server", "lib/seccomp_redbear"]
+members = ["server", "lib/sandbox_seccomp"]
 default-members = ["server"]

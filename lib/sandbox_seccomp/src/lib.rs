@@ -114,11 +114,46 @@ fn set_no_new_privs() -> Result<(), c_int> {
  *   negative error code on failure
  */
 fn drop_privileges(uid: uid_t, gid: gid_t) -> Result<(), c_int> {
+    /* Drop ALL supplementary groups first, while still privileged.
+     * Without this, a process started as root keeps its inherited
+     * supplementary group memberships (including group 0) after setuid,
+     * which can grant unintended access to group-owned files. This MUST
+     * happen before setgid/setuid (it needs CAP_SETGID). */
+    if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
+        return Err(-10);
+    }
     if unsafe { libc::setgid(gid) } != 0 {
         return Err(-4);
     }
     if unsafe { libc::setuid(uid) } != 0 {
         return Err(-5);
+    }
+    Ok(())
+}
+
+/*
+ * set_memory_limit - cap the process virtual address space (RLIMIT_AS)
+ * @max_as_bytes: address-space cap in bytes; 0 disables the cap
+ *
+ * The cap is supplied by the caller (Rust server, per language) rather than
+ * read from the environment, so it works uniformly across the fast (zygote)
+ * and slow (fresh-spawn) paths without relying on inherited env. Lowering the
+ * limit needs no privilege.
+ *
+ * Return:
+ *   0 on success
+ *   negative error code on failure
+ */
+fn set_memory_limit(max_as_bytes: u64) -> Result<(), c_int> {
+    if max_as_bytes == 0 {
+        return Ok(()); /* disabled */
+    }
+    let lim = libc::rlimit {
+        rlim_cur: max_as_bytes as libc::rlim_t,
+        rlim_max: max_as_bytes as libc::rlim_t,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_AS, &lim) } != 0 {
+        return Err(-11);
     }
     Ok(())
 }
@@ -190,7 +225,15 @@ fn install_seccomp(enable_network: bool) -> Result<(), c_int> {
  *   negative error code on failure
  */
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn init_seccomp(uid: uid_t, gid: gid_t, enable_network: i32) -> c_int {
+pub unsafe extern "C" fn init_seccomp(
+    uid: uid_t,
+    gid: gid_t,
+    enable_network: i32,
+    max_as_bytes: u64,
+) -> c_int {
+    if let Err(code) = set_memory_limit(max_as_bytes) {
+        return code;
+    }
     if let Err(code) = setup_root() {
         return code;
     }
@@ -221,4 +264,18 @@ pub unsafe extern "C" fn get_lib_feature_static() -> *const c_char {
     let s = b"none\0";
 
     s.as_ptr() as *const c_char
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cap of 0 means "disabled" and must be a no-op (no setrlimit call),
+    /// so it can never fail. (Non-zero values would alter the test process's
+    /// own RLIMIT_AS, so we don't exercise them here.)
+    #[test]
+    fn zero_cap_is_disabled_noop() {
+        assert!(set_memory_limit(0).is_ok());
+    }
 }

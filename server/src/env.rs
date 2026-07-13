@@ -53,9 +53,14 @@ async fn copy_into_jail(src: &str) -> Result<(), String> {
 /// the server from starting.
 pub async fn prepare_environment(config: &Config) {
     tracing::info!(
+        python_path_count = config.python_lib_paths.len(),
+        nodejs_path_count = config.nodejs_lib_paths.len(),
+        "Preparing sandbox environment"
+    );
+    tracing::debug!(
         python_paths = ?config.python_lib_paths,
         nodejs_paths = ?config.nodejs_lib_paths,
-        "Preparing sandbox environment"
+        "Sandbox environment path details"
     );
 
     for src in &config.python_lib_paths {

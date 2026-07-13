@@ -84,6 +84,6 @@ pub async fn install_python_dependencies(config: &Config) -> Result<(), String> 
         return Err(stderr.into_owned());
     }
 
-    tracing::info!("Python dependencies installed successfully");
+    tracing::info!(count = packages.len(), "Python dependencies installed successfully");
     Ok(())
 }

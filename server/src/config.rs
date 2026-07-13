@@ -82,8 +82,19 @@ pub struct Config {
     #[serde(default = "default_sandbox_uid")]
     pub sandbox_uid: u32,
 
-    #[serde(default)]
+    #[serde(default = "default_sandbox_gid")]
     pub sandbox_gid: u32,
+
+    /// Per-request virtual address space cap (RLIMIT_AS) in bytes, passed into
+    /// init_seccomp. Bounds a single execution's memory so a runaway
+    /// allocation fails cleanly instead of exhausting host memory. `0`
+    /// disables. Node needs a higher value than Python (V8 reserves ~700MB of
+    /// virtual space just to start).
+    #[serde(default = "default_python_max_as_bytes")]
+    pub python_max_as_bytes: u64,
+
+    #[serde(default = "default_nodejs_max_as_bytes")]
+    pub nodejs_max_as_bytes: u64,
 
     #[serde(default)]
     pub proxy: ProxyConfig,
@@ -105,6 +116,13 @@ fn default_zygote_modules() -> Vec<String> {
 }
 
 fn default_sandbox_uid() -> u32 { 65537 }
+
+/// Dedicated non-privileged group. Never 0 — running the sandbox with the root
+/// group (gid 0) would grant access to group-root-owned files.
+fn default_sandbox_gid() -> u32 { 65537 }
+
+fn default_python_max_as_bytes() -> u64 { 1024 * 1024 * 1024 } // 1 GiB
+fn default_nodejs_max_as_bytes() -> u64 { 2 * 1024 * 1024 * 1024 } // 2 GiB
 
 fn default_python_lib_paths() -> Vec<String> {
     vec![
@@ -161,5 +179,45 @@ impl Config {
         if let Ok(v) = std::env::var("NODEJS_LIB_PATH") {
             self.nodejs_lib_paths = v.split(',').map(|s| s.trim().to_string()).collect();
         }
+        if let Ok(v) = std::env::var("PYTHON_MAX_AS_BYTES") {
+            if let Ok(n) = v.parse() { self.python_max_as_bytes = n; }
+        }
+        if let Ok(v) = std::env::var("NODEJS_MAX_AS_BYTES") {
+            if let Ok(n) = v.parse() { self.nodejs_max_as_bytes = n; }
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_gid_default_is_not_root_group() {
+        assert_ne!(default_sandbox_gid(), 0, "sandbox must not default to gid 0 (root group)");
+        assert_eq!(default_sandbox_gid(), 65537);
+    }
+
+    /// A config that omits sandbox_gid must NOT silently fall back to the root
+    /// group (the old `#[serde(default)]` gave 0).
+    #[test]
+    fn omitted_gid_defaults_to_nonroot() {
+        let toml = r#"
+[app]
+port = 8194
+key = "test"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("parse minimal config");
+        assert_ne!(cfg.sandbox_gid, 0, "omitted sandbox_gid must not be root group");
+        assert_eq!(cfg.sandbox_gid, 65537);
+    }
+
+    /// The shipped config.toml must not use the root group.
+    #[test]
+    fn shipped_config_gid_is_not_root() {
+        let cfg: Config =
+            toml::from_str(include_str!("../config.toml")).expect("parse shipped config");
+        assert_ne!(cfg.sandbox_gid, 0, "config.toml sandbox_gid must not be 0");
     }
 }

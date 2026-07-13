@@ -110,7 +110,10 @@ impl ZygoteManager {
 
         let p = pending.clone();
         let r = running.clone();
-        let read_task = tokio::spawn(async move { read_loop(read_half, p, r).await });
+        let w = write_half.clone();
+        let max_output = max_output_bytes();
+        let read_task =
+            tokio::spawn(async move { read_loop(read_half, w, p, r, max_output).await });
 
         Ok(Self {
             write_half,
@@ -139,6 +142,7 @@ impl ZygoteManager {
         uid: u32,
         gid: u32,
         net: bool,
+        max_as: u64,
         timeout: Duration,
     ) -> (String, String, i32) {
         if !self.running.load(Ordering::SeqCst) {
@@ -159,7 +163,7 @@ impl ZygoteManager {
 
         let payload = serde_json::json!({
             "code": code_b64, "key": key_b64,
-            "uid": uid, "gid": gid, "net": net,
+            "uid": uid, "gid": gid, "net": net, "max_as": max_as,
         }).to_string();
         let frame = encode_frame(MSG_RUN, req_id, payload.as_bytes());
 
@@ -216,15 +220,30 @@ impl Drop for ZygoteManager {
 
 // ── Background reader ──
 
+/// Per-request output cap (stdout + stderr). A child exceeding it is killed and
+/// its request fails, so a runaway `print` loop cannot make the manager buffer
+/// unbounded output into memory (OOM). Override via `ZYGOTE_MAX_OUTPUT_BYTES`.
+const DEFAULT_MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+
+fn max_output_bytes() -> usize {
+    std::env::var("ZYGOTE_MAX_OUTPUT_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_BYTES)
+}
+
 async fn read_loop(
     mut rd: OwnedReadHalf,
+    write_half: Arc<Mutex<OwnedWriteHalf>>,
     pending: Arc<Mutex<HashMap<u32, Pending>>>,
     running: Arc<AtomicBool>,
+    max_output: usize,
 ) {
     let mut buf = vec![0u8; 65536];
     let mut frame_buf: Vec<u8> = Vec::new();
 
-    loop {
+    'read: loop {
         let n = match rd.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => n,
@@ -242,6 +261,14 @@ async fn read_loop(
                 frame_buf[5], frame_buf[6], frame_buf[7], frame_buf[8],
             ]);
 
+            // Sanity cap: a single frame larger than the whole per-request
+            // budget signals a corrupt/hostile stream. Close the reader rather
+            // than let frame_buf grow to `plen`.
+            if plen > max_output {
+                tracing::error!(plen, max_output, "zygote: oversized frame; closing reader");
+                break 'read;
+            }
+
             if frame_buf.len() < HEADER_SIZE + plen {
                 break;
             }
@@ -249,27 +276,59 @@ async fn read_loop(
             let payload = frame_buf[HEADER_SIZE..HEADER_SIZE + plen].to_vec();
             frame_buf.drain(..HEADER_SIZE + plen);
 
-            let mut pending_map = pending.lock().await;
-            if let Some(entry) = pending_map.get_mut(&req_id) {
-                match mtype {
-                    MSG_STDOUT => entry.out.extend_from_slice(&payload),
-                    MSG_STDERR => entry.err.extend_from_slice(&payload),
-                    MSG_DONE => {
-                        let exit_code = if payload.len() >= 4 {
-                            i32::from_be_bytes([
-                                payload[0], payload[1], payload[2], payload[3],
-                            ])
-                        } else {
-                            -1
-                        };
-                        let out = String::from_utf8_lossy(&entry.out).into_owned();
-                        let err = String::from_utf8_lossy(&entry.err).into_owned();
-                        if let Some(tx) = entry.tx.take() {
-                            let _ = tx.send((out, err, exit_code));
+            // Apply the frame under the pending lock; if this request blew its
+            // output budget, note it and KILL the child *after* releasing the
+            // lock (run() may hold write_half while touching pending, so we
+            // must never hold pending across a write_half lock here).
+            let mut kill_req: Option<u32> = None;
+            {
+                let mut pending_map = pending.lock().await;
+                if let Some(entry) = pending_map.get_mut(&req_id) {
+                    match mtype {
+                        MSG_STDOUT => entry.out.extend_from_slice(&payload),
+                        MSG_STDERR => entry.err.extend_from_slice(&payload),
+                        MSG_DONE => {
+                            let exit_code = if payload.len() >= 4 {
+                                i32::from_be_bytes([
+                                    payload[0], payload[1], payload[2], payload[3],
+                                ])
+                            } else {
+                                -1
+                            };
+                            let out = String::from_utf8_lossy(&entry.out).into_owned();
+                            let err = String::from_utf8_lossy(&entry.err).into_owned();
+                            if let Some(tx) = entry.tx.take() {
+                                let _ = tx.send((out, err, exit_code));
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
+
+                    // Enforce the per-request output cap (stdout + stderr).
+                    if matches!(mtype, MSG_STDOUT | MSG_STDERR)
+                        && entry.out.len() + entry.err.len() > max_output
+                    {
+                        let out = String::from_utf8_lossy(&entry.out).into_owned();
+                        if let Some(tx) = entry.tx.take() {
+                            let _ = tx.send((
+                                out,
+                                format!(
+                                    "output limit exceeded (> {max_output} bytes); process killed"
+                                ),
+                                -1,
+                            ));
+                        }
+                        // Free the buffered output now and ignore further frames
+                        // for this request.
+                        pending_map.remove(&req_id);
+                        kill_req = Some(req_id);
+                    }
                 }
+            }
+            if let Some(rid) = kill_req {
+                let frame = encode_frame(MSG_KILL, rid, &[]);
+                let mut w = write_half.lock().await;
+                let _ = w.write_all(&frame).await;
             }
         }
     }
@@ -290,6 +349,69 @@ async fn read_loop(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// A request whose combined stdout+stderr exceeds the per-request cap must
+    /// be failed with an "output limit exceeded" error AND the child must be
+    /// killed (a MSG_KILL frame sent back to the worker). This is the OOM guard.
+    #[tokio::test]
+    async fn per_request_output_cap_kills_child() {
+        let (worker, server) = UnixStream::pair().unwrap();
+        let (s_read, s_write) = server.into_split();
+        let write_half = Arc::new(Mutex::new(s_write));
+        let pending: Arc<Mutex<HashMap<u32, Pending>>> = Arc::new(Mutex::new(HashMap::new()));
+        let running = Arc::new(AtomicBool::new(true));
+
+        let (tx, rx) = oneshot::channel();
+        pending.lock().await.insert(
+            7,
+            Pending { out: Vec::new(), err: Vec::new(), tx: Some(tx) },
+        );
+
+        let max_output = 100usize;
+        let task = {
+            let p = pending.clone();
+            let r = running.clone();
+            let w = write_half.clone();
+            tokio::spawn(async move { read_loop(s_read, w, p, r, max_output).await })
+        };
+
+        // Worker writes 120 bytes of stdout for req 7 (> 100 cap).
+        let (mut rd_worker, mut wr_worker) = worker.into_split();
+        let chunk = vec![b'x'; 60];
+        wr_worker.write_all(&encode_frame(MSG_STDOUT, 7, &chunk)).await.unwrap();
+        wr_worker.write_all(&encode_frame(MSG_STDOUT, 7, &chunk)).await.unwrap();
+
+        // The request completes with the limit error.
+        let (_out, err, code) = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("rx timed out")
+            .expect("sender dropped");
+        assert_eq!(code, -1);
+        assert!(err.contains("output limit exceeded"), "unexpected err: {err}");
+
+        // The manager sent a MSG_KILL for req 7 back to the worker.
+        let mut hdr = [0u8; HEADER_SIZE];
+        tokio::time::timeout(Duration::from_secs(2), rd_worker.read_exact(&mut hdr))
+            .await
+            .expect("no kill frame")
+            .expect("read kill frame");
+        assert_eq!(hdr[4], MSG_KILL, "expected MSG_KILL frame");
+        assert_eq!(u32::from_be_bytes([hdr[5], hdr[6], hdr[7], hdr[8]]), 7);
+
+        // The over-limit request's buffer was freed (entry removed).
+        assert!(pending.lock().await.get(&7).is_none());
+
+        task.abort();
+    }
+
+    /// Env override parsing: invalid/zero falls back to the default.
+    #[test]
+    fn max_output_env_parsing() {
+        assert_eq!(DEFAULT_MAX_OUTPUT_BYTES, 10 * 1024 * 1024);
+        // Default when unset (no other test sets this var).
+        std::env::remove_var("ZYGOTE_MAX_OUTPUT_BYTES");
+        assert_eq!(max_output_bytes(), DEFAULT_MAX_OUTPUT_BYTES);
+    }
 
     /// Regression test for C1 (zygote deadlock).
     ///

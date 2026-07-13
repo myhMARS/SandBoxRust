@@ -5,15 +5,15 @@ let koffi = require('koffi')
 process.chdir(argv[2])
 
 let lib = koffi.load("./libnodejs.so")
-/** @type {(uid: number, gid: number, enableNetwork: boolean) => number} */
-let initSeccomp = lib.func('int init_seccomp(int, int, bool)')
+/** @type {(uid: number, gid: number, enableNetwork: boolean, maxAs: number) => number} */
+let initSeccomp = lib.func('int init_seccomp(int, int, bool, uint64_t)')
 
 let uid = parseInt(argv[3])
 let gid = parseInt(argv[4])
 
 let options = JSON.parse(argv[5])
 
-let seccomp_init = initSeccomp(uid, gid, options['enable_network'])
+let seccomp_init = initSeccomp(uid, gid, options['enable_network'], options['max_as'])
 if (seccomp_init !== 0) {
     throw `code executor err - ${seccomp_init}`
 }

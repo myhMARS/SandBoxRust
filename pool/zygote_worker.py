@@ -30,11 +30,16 @@ _SELF_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _SELF_DIR)
 import protocol as P  # noqa: E402
 
+# Max bytes buffered for the control socket before we stop draining child
+# pipes (applying backpressure to the producing child instead of growing this
+# buffer without bound).
+_SEND_BUF_CAP = 4 * 1024 * 1024  # 4 MiB
+
 
 def _log(msg: str) -> None:
     """Diagnostics go to the zygote's own stderr (captured by the server),
     never to fd 1/2 that children reuse."""
-    sys.stderr.write(f"[zygote] {msg}\n")
+    sys.stderr.write(f"INFO sandbox_server::zygote: {msg}\n")
     sys.stderr.flush()
 
 
@@ -43,8 +48,26 @@ def _xor(data: bytes, key: bytes) -> bytes:
     if n == 0:
         return b""
     kl = len(key)
-    keystream = key * (n // kl) + key[: n % kl]
-    return (int.from_bytes(data, "big") ^ int.from_bytes(keystream, "big")).to_bytes(n, "big")
+    # XOR in key-aligned chunks. The big-int XOR runs in C (far faster than a
+    # per-byte Python loop), but XORing the WHOLE buffer at once allocates
+    # several n-sized temporaries simultaneously (~4x input at peak). Chunking
+    # caps peak memory at ~O(chunk) while staying just as fast; each chunk is a
+    # multiple of the key length so its keystream always starts at key[0].
+    chunk = max(kl, (65536 // kl) * kl)  # ~64 KiB, aligned to key length
+    out = bytearray(n)
+    mv = memoryview(data)
+    i = 0
+    while i < n:
+        end = i + chunk
+        if end > n:
+            end = n
+        seg_len = end - i
+        keystream = key * (seg_len // kl) + key[: seg_len % kl]
+        out[i:end] = (
+            int.from_bytes(mv[i:end], "big") ^ int.from_bytes(keystream, "big")
+        ).to_bytes(seg_len, "big")
+        i = end
+    return bytes(out)
 
 
 class Zygote:
@@ -55,7 +78,7 @@ class Zygote:
 
         # Warm load of the seccomp library. Inherited by every child via COW.
         self.lib = ctypes.CDLL(lib_so)
-        self.lib.init_seccomp.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_bool]
+        self.lib.init_seccomp.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint64]
         self.lib.init_seccomp.restype = ctypes.c_int
 
         # Initialize the tokenizer/codec machinery now (unrestricted parent) so
@@ -68,8 +91,12 @@ class Zygote:
         self._warm_import(warm_modules)
 
         self.ctrl = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, fileno=ctrl_fd)
-        self.ctrl.setblocking(True)
+        # Non-blocking control socket: a slow manager must never block the
+        # single-threaded event loop, which would stall EVERY child's output.
+        self.ctrl.setblocking(False)
         self._recv_buf = bytearray()
+        # Pending outbound bytes, flushed when the socket becomes writable.
+        self._out = bytearray()
 
         # req_id -> {"pid", "out", "err", "open": set(fds)}
         self.reqs: dict[int, dict] = {}
@@ -117,18 +144,35 @@ class Zygote:
             except Exception as e:  # noqa: BLE001 - best effort, skip failures
                 _log(f"warm import failed for {name!r}: {e}")
         if ok:
-            _log(f"warm-imported {len(ok)} modules: {', '.join(ok)}")
+            _log(f"warm-imported {len(ok)} modules")
 
     # ------------------------------------------------------------------ IO
     def _send(self, msg_type: int, req_id: int, payload: bytes = b"") -> None:
-        try:
-            self.ctrl.sendall(P.encode_frame(msg_type, req_id, payload))
-        except (BrokenPipeError, OSError):
-            # Server went away; nothing left to do.
-            os._exit(0)
+        # Queue the frame and try a best-effort non-blocking flush. Never block:
+        # a blocking sendall here freezes the whole event loop (and thus every
+        # child's output) whenever the manager reads slowly.
+        self._out += P.encode_frame(msg_type, req_id, payload)
+        self._flush()
+
+    def _flush(self) -> None:
+        """Send as much buffered output as the socket will accept right now."""
+        while self._out:
+            try:
+                sent = self.ctrl.send(self._out)
+            except BlockingIOError:
+                break  # kernel send buffer full; retry when writable
+            except (BrokenPipeError, OSError):
+                # Server went away; nothing left to do.
+                os._exit(0)
+            if sent <= 0:
+                break
+            del self._out[:sent]
 
     def _read_ctrl_frames(self):
-        chunk = self.ctrl.recv(65536)
+        try:
+            chunk = self.ctrl.recv(65536)
+        except BlockingIOError:
+            return  # spurious readiness; nothing to read yet
         if not chunk:
             # Control socket closed -> server gone.
             os._exit(0)
@@ -172,18 +216,30 @@ class Zygote:
             devnull = os.open(os.devnull, os.O_RDONLY)
             os.dup2(devnull, 0)
             os.close(devnull)
-            # Close inherited fds the child must never see (control socket,
-            # this and other requests' pipe fds).
-            for fd in {out_w, err_w, out_r, err_r, self.ctrl.fileno()}:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            for fd in list(self.fd_map.keys()):
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
+            # Close EVERY inherited fd except stdio (0/1/2). Enumerating
+            # /proc/self/fd catches descriptors an explicit close-set would
+            # miss — the control socket, other requests' pipes, and especially
+            # file/socket handles opened by warm-imported preload modules that
+            # fork() duplicated into this child. Runs after the dup2 redirection
+            # above, so 0/1/2 already point where they should.
+            _keep = (0, 1, 2)
+            try:
+                _inherited = [int(e) for e in os.listdir("/proc/self/fd")]
+            except (OSError, ValueError):
+                _inherited = []
+            if _inherited:
+                for _fd in _inherited:
+                    if _fd not in _keep:
+                        try:
+                            os.close(_fd)
+                        except OSError:
+                            pass
+            else:
+                # /proc unavailable: fall back to closing a bounded fd range.
+                import resource
+                _soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+                _maxfd = _soft if _soft not in (resource.RLIM_INFINITY, -1) else 65536
+                os.closerange(3, _maxfd)
 
             # Drop the implicit ''/cwd entry (would call getcwd() post-seccomp)
             # and the zygote's own helper dir, so user code cannot re-import the
@@ -194,7 +250,8 @@ class Zygote:
             uid = int(req["uid"])
             gid = int(req["gid"])
             net = bool(req["net"])
-            rc = self.lib.init_seccomp(uid, gid, net)
+            max_as = int(req.get("max_as", 0))
+            rc = self.lib.init_seccomp(uid, gid, net, max_as)
             if rc != 0:
                 raise RuntimeError(f"code executor err - {rc}")
 
@@ -282,13 +339,23 @@ class Zygote:
     def serve(self) -> None:
         _log(f"ready (lib_dir={self.lib_dir})")
         while True:
-            rlist = [self.ctrl.fileno()] + list(self.fd_map.keys())
+            ctrl_fd = self.ctrl.fileno()
+            # Only drain child pipes while the outbound buffer has headroom. If
+            # the manager is slow and the buffer is full, stop reading children
+            # (their pipes fill -> they block = backpressure on the producer),
+            # but keep the loop alive to flush and to accept control frames.
+            rlist = [ctrl_fd]
+            if len(self._out) < _SEND_BUF_CAP:
+                rlist += list(self.fd_map.keys())
+            wlist = [ctrl_fd] if self._out else []
             try:
-                readable, _, _ = select.select(rlist, [], [])
+                readable, writable, _ = select.select(rlist, wlist, [])
             except InterruptedError:
                 continue
+            if writable:
+                self._flush()
             for fd in readable:
-                if fd == self.ctrl.fileno():
+                if fd == ctrl_fd:
                     for mtype, req_id, payload in self._read_ctrl_frames():
                         if mtype == P.MSG_RUN:
                             self._handle_run(req_id, payload)
