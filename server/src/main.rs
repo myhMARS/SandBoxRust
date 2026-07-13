@@ -1,15 +1,11 @@
 mod config;
 mod crypto;
-mod dependencies;
-mod env;
+mod handlers;
 mod middleware;
 mod models;
-#[cfg(unix)]
-mod pool;
 mod queue;
-mod routes;
-mod runners;
 mod services;
+mod setup;
 
 #[cfg(unix)]
 use std::sync::{Arc, RwLock};
@@ -19,12 +15,12 @@ use actix_web::{web, App, HttpServer};
 use crate::config::Config;
 use crate::queue::QueueController;
 #[cfg(unix)]
-use crate::runners::LIB_PATH;
+use crate::services::LIB_PATH;
 
 /// Global zygote manager — supports auto-restart on connection loss.
 /// Only available on Unix (Linux Docker).
 #[cfg(unix)]
-use crate::pool::zygote::ZygoteManager;
+use crate::services::zygote::ZygoteManager;
 
 #[cfg(unix)]
 static ZYGOTE: RwLock<Option<Arc<ZygoteManager>>> = RwLock::new(None);
@@ -144,7 +140,7 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     let config_path =
-        std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config.toml".into());
+        std::env::var("CONFIG_PATH").unwrap_or_else(|_| "runtime/config.toml".into());
     let config = Config::load(&config_path).expect("Failed to load config");
 
     let queue = QueueController::start(config.max_workers);
@@ -171,12 +167,12 @@ async fn main() -> std::io::Result<()> {
     );
 
     // Install initial dependencies
-    if let Err(e) = crate::dependencies::install_python_dependencies(&config).await {
+    if let Err(e) = crate::setup::dependencies::install_python_dependencies(&config).await {
         tracing::warn!("Failed to install initial Python dependencies: {e}");
     }
 
     // Prepare sandbox environment (stdlib, system libs into chroot jail)
-    crate::env::prepare_environment(&config).await;
+    crate::setup::env::prepare_environment(&config).await;
 
     // Start pre-warmed Python zygote (if enabled) for fast cold-start.
     // Unix-only: requires fork() + seccomp, which are Linux features.
@@ -222,14 +218,14 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(cfg.clone()))
             .app_data(web::Data::new(q.clone()))
-            .route("/health", web::get().to(routes::health))
+            .route("/health", web::get().to(handlers::health))
             .service(
                 web::scope("/v1/sandbox")
-                    .route("/run", web::post().to(routes::run_code))
-                    .route("/dependencies", web::get().to(routes::get_dependencies))
+                    .route("/run", web::post().to(handlers::run_code))
+                    .route("/dependencies", web::get().to(handlers::get_dependencies))
                     .route(
                         "/dependencies/update",
-                        web::post().to(routes::update_dependencies),
+                        web::post().to(handlers::update_dependencies),
                     ),
             )
     })

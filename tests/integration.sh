@@ -6,7 +6,7 @@ RED='\033[0;31m' GREEN='\033[0;32m' NC='\033[0m'
 pass() { echo -e "${GREEN}PASS${NC} $1"; }
 fail() { echo -e "${RED}FAIL${NC} $1"; exit 1; }
 
-CONFIG_PATH="${CONFIG_PATH:-server/config.toml}"
+CONFIG_PATH="${CONFIG_PATH:-runtime/config.toml}"
 API_KEY="${API_KEY:-sandbox-server}"
 BASE="http://127.0.0.1:8194"
 HEADER="-H X-Api-Key:$API_KEY"

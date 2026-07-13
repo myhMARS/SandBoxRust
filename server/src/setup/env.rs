@@ -10,7 +10,7 @@ use std::path::Path;
 use tokio::process::Command;
 
 use crate::config::Config;
-use crate::runners::LIB_PATH;
+use crate::services::LIB_PATH;
 
 /// Copy a source file or directory tree into the sandbox jail via `env.sh`.
 ///

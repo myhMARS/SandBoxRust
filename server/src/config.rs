@@ -217,7 +217,7 @@ key = "test"
     #[test]
     fn shipped_config_gid_is_not_root() {
         let cfg: Config =
-            toml::from_str(include_str!("../config.toml")).expect("parse shipped config");
+            toml::from_str(include_str!("../../runtime/config.toml")).expect("parse shipped config");
         assert_ne!(cfg.sandbox_gid, 0, "config.toml sandbox_gid must not be 0");
     }
 }

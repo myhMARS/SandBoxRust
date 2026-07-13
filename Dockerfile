@@ -10,7 +10,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY server/ server/
 COPY lib/sandbox_seccomp/ lib/sandbox_seccomp/
-COPY prescript.py prescript.js ./
+COPY runtime/ runtime/
 
 # Build server (uses workspace resolver)
 RUN cargo build --release -p sandbox-server
@@ -46,11 +46,8 @@ COPY --from=seccomp /libnodejs.so /usr/local/share/sandbox/libnodejs.so
 COPY --from=builder /build/target/release/sandbox-server /usr/local/bin/sandbox-server
 
 # Config and runtime assets
-COPY server/config.toml /etc/sandbox/config.toml
-COPY prescript.py prescript.js /usr/local/share/sandbox/
-COPY dependencies/ /usr/local/share/sandbox/dependencies/
-COPY script/ /usr/local/share/sandbox/script/
-COPY pool/ /usr/local/share/sandbox/pool/
+COPY runtime/config.toml /etc/sandbox/config.toml
+COPY runtime/ /usr/local/share/sandbox/
 
 RUN mkdir -p /usr/local/share/sandbox/tmp && chmod 1777 /usr/local/share/sandbox/tmp
 

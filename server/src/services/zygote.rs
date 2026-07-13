@@ -18,7 +18,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::runners::LIB_PATH;
+use crate::services::LIB_PATH;
 
 fn socketpair() -> io::Result<(i32, i32)> {
     let mut fds = [-1i32; 2];
