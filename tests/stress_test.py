@@ -68,6 +68,13 @@ WORKLOADS = {
     "javascript": NODEJS_CODE,
 }
 
+# Expected stdout for each workload — validates that sandbox execution
+# actually produced the correct result (not just HTTP 200).
+EXPECTED_STDOUT = {
+    "python3": '{"sum": 338350, "sqrt": 581.68}',
+    "javascript": '{"sum":338350,"sqrt":581.68}',
+}
+
 
 # ── Request sender ──
 
@@ -106,8 +113,8 @@ def send_request(language: str) -> tuple[float, int, str]:
         return latency, 0, str(e)
 
 
-def check_response(status: int, body: str) -> Optional[str]:
-    """Return None if response looks healthy, otherwise an error string."""
+def check_response(language: str, status: int, body: str) -> Optional[str]:
+    """Return None if response is healthy AND stdout matches expected output."""
     if status != 200:
         return f"HTTP {status}"
     try:
@@ -116,6 +123,12 @@ def check_response(status: int, body: str) -> Optional[str]:
         return f"bad json: {body[:120]}"
     if resp.get("code") != 0:
         return f"api error code={resp.get('code')} msg={resp.get('message', '')[:80]}"
+    # Verify execution output
+    data = resp.get("data") or {}
+    stdout = (data.get("stdout") or "").strip()
+    expected = EXPECTED_STDOUT.get(language, "")
+    if stdout != expected:
+        return f"wrong output: expected={expected[:60]} got={stdout[:60]}"
     return None
 
 
@@ -137,7 +150,7 @@ def run_stress(
         futures = [pool.submit(send_request, language) for _ in range(total)]
         for future in as_completed(futures):
             lat, status, body = future.result()
-            err = check_response(status, body)
+            err = check_response(language, status, body)
             if err:
                 errors.append(err)
             else:
