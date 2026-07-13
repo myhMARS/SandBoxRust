@@ -1,8 +1,4 @@
-[app]
-port = 8194
-debug = false
-key = "sandbox"
-
+# ── Sandbox runtime ──
 max_workers = 4
 worker_timeout = 30
 
@@ -28,6 +24,13 @@ sandbox_gid = 65537
 python_max_as_bytes = 1073741824   # 1 GiB
 nodejs_max_as_bytes = 2147483648   # 2 GiB
 
+# ── Server ──
+[app]
+port = 8194
+debug = false
+key = "sandbox"
+
+# ── Proxy ──
 [proxy]
 socks5 = ""
 http = ""

@@ -213,6 +213,14 @@ key = "test"
         assert_eq!(cfg.sandbox_gid, 65537);
     }
 
+    /// The shipped config.toml must enable zygote by default.
+    #[test]
+    fn shipped_config_zygote_enabled() {
+        let cfg: Config =
+            toml::from_str(include_str!("../../runtime/config.toml")).expect("parse shipped config");
+        assert!(cfg.python_zygote, "config.toml python_zygote must be true");
+    }
+
     /// The shipped config.toml must not use the root group.
     #[test]
     fn shipped_config_gid_is_not_root() {

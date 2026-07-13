@@ -1,4 +1,4 @@
-use actix_web::{web, FromRequest, HttpRequest};
+use actix_web::{web, error::InternalError, FromRequest, HttpRequest, HttpResponse};
 use std::future::{ready, Ready};
 use subtle::ConstantTimeEq;
 
@@ -25,9 +25,12 @@ impl FromRequest for ApiKey {
             {
                 ready(Ok(ApiKey(val.into())))
             }
-            _ => ready(Err(actix_web::error::ErrorUnauthorized(
-                r#"{"code":401,"message":"Invalid API key","data":null}"#,
-            ))),
+            _ => ready(Err(InternalError::from_response(
+                "Invalid API key",
+                HttpResponse::Unauthorized()
+                    .json(crate::models::ApiResponse::error(401, "Invalid API key")),
+            )
+            .into())),
         }
     }
 }

@@ -52,7 +52,7 @@ COPY runtime/ /usr/local/share/sandbox/
 RUN mkdir -p /usr/local/share/sandbox/tmp && chmod 1777 /usr/local/share/sandbox/tmp
 
 # Install Node.js koffi FFI library (required by prescript.js for seccomp)
-RUN cd /usr/local/share/sandbox && npm install koffi
+RUN cd /usr/local/share/sandbox && npm install koffi@3
 
 # Sandbox user + dedicated non-privileged group for privilege dropping
 RUN groupadd -g 65537 sandbox && useradd -u 65537 -g 65537 sandbox
