@@ -77,6 +77,9 @@ impl ZygoteManager {
         lib_so: &str,
         lib_dir: &str,
         warm_modules: &[String],
+        socks5_proxy: Option<&String>,
+        http_proxy: Option<&String>,
+        https_proxy: Option<&String>,
     ) -> io::Result<Self> {
         let (server_fd, worker_fd) = socketpair()?;
 
@@ -85,6 +88,18 @@ impl ZygoteManager {
         cmd.env_clear();
         if let Ok(path) = std::env::var("PATH") {
             cmd.env("PATH", &path);
+        }
+        // Inject proxy env vars so the zygote and its forked children
+        // inherit them.  Mirrors the Node.js / Python slow-path runners.
+        if let Some(socks5) = socks5_proxy {
+            cmd.env("HTTPS_PROXY", socks5).env("HTTP_PROXY", socks5);
+        } else {
+            if let Some(h) = https_proxy {
+                cmd.env("HTTPS_PROXY", h);
+            }
+            if let Some(h) = http_proxy {
+                cmd.env("HTTP_PROXY", h);
+            }
         }
         let child = cmd
             .args([

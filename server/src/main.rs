@@ -100,6 +100,9 @@ pub(crate) async fn try_restart_zygote(config: &Config) -> bool {
         "./libpython.so",
         LIB_PATH,
         &config.python_zygote_preload_modules,
+        config.proxy.socks5_option(),
+        config.proxy.http_option(),
+        config.proxy.https_option(),
     ) {
         Ok(z) => z,
         Err(e) => {
@@ -189,6 +192,9 @@ async fn main() -> std::io::Result<()> {
             "./libpython.so",
             LIB_PATH,
             &config.python_zygote_preload_modules,
+            config.proxy.socks5_option(),
+            config.proxy.http_option(),
+            config.proxy.https_option(),
         ) {
             Ok(zygote) => {
                 tracing::info!("Python zygote pool started");

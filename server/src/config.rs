@@ -51,7 +51,6 @@ pub struct Config {
 
     /// Use pre-warmed zygote for Python (Linux-only: fork + seccomp).
     #[serde(default)]
-    #[allow(dead_code)]
     pub python_zygote: bool,
 
     /// Modules pre-imported in the zygote at startup (inherited via COW).
@@ -161,6 +160,9 @@ impl Config {
         if let Ok(v) = std::env::var("ENABLE_NETWORK") {
             self.enable_network = matches!(v.as_str(), "1" | "true" | "yes");
         }
+        if let Ok(v) = std::env::var("ENABLE_PRELOAD") {
+            self.enable_preload = matches!(v.as_str(), "1" | "true" | "yes");
+        }
         if let Ok(v) = std::env::var("PYTHON_ZYGOTE") {
             self.python_zygote = matches!(v.as_str(), "1" | "true" | "yes");
         }
@@ -175,6 +177,15 @@ impl Config {
         }
         if let Ok(v) = std::env::var("NODEJS_MAX_AS_BYTES") {
             if let Ok(n) = v.parse() { self.nodejs_max_as_bytes = n; }
+        }
+        if let Ok(v) = std::env::var("SOCKS5_PROXY") {
+            self.proxy.socks5 = v;
+        }
+        if let Ok(v) = std::env::var("HTTP_PROXY") {
+            self.proxy.http = v;
+        }
+        if let Ok(v) = std::env::var("HTTPS_PROXY") {
+            self.proxy.https = v;
         }
     }
 }

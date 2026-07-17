@@ -7,10 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 # Copy workspace manifest and all source (lock file enables reproducible builds)
-COPY Cargo.toml Cargo.lock ./
-COPY server/ server/
-COPY lib/sandbox_seccomp/ lib/sandbox_seccomp/
-COPY runtime/ runtime/
+COPY ../Cargo.toml Cargo.lock ./
+COPY ../server server/
+COPY ../lib/sandbox_seccomp lib/sandbox_seccomp/
+COPY ../runtime runtime/
 
 # Build server (uses workspace resolver)
 RUN cargo build --release -p sandbox-server
@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libseccomp-dev && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY lib/sandbox_seccomp/ ./
+COPY ../lib/sandbox_seccomp ./
 
 RUN cargo build --release --features python3 && \
     mv target/release/libsandbox.so /libpython.so
@@ -46,8 +46,8 @@ COPY --from=seccomp /libnodejs.so /usr/local/share/sandbox/libnodejs.so
 COPY --from=builder /build/target/release/sandbox-server /usr/local/bin/sandbox-server
 
 # Config and runtime assets
-COPY runtime/config.toml /etc/sandbox/config.toml
-COPY runtime/ /usr/local/share/sandbox/
+COPY ../runtime/config.toml /etc/sandbox/config.toml
+COPY ../runtime /usr/local/share/sandbox/
 
 RUN mkdir -p /usr/local/share/sandbox/tmp && chmod 1777 /usr/local/share/sandbox/tmp
 

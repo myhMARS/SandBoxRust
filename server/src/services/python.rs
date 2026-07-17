@@ -106,6 +106,18 @@ pub async fn run(
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", &path);
     }
+    // Inject proxy env vars so Python HTTP libraries (requests, urllib, …)
+    // respect the configured proxy.  Mirrors the Node.js runner.
+    if let Some(socks5) = config.proxy.socks5_option() {
+        cmd.env("HTTPS_PROXY", socks5).env("HTTP_PROXY", socks5);
+    } else {
+        if let Some(h) = config.proxy.https_option() {
+            cmd.env("HTTPS_PROXY", h);
+        }
+        if let Some(h) = config.proxy.http_option() {
+            cmd.env("HTTP_PROXY", h);
+        }
+    }
     cmd.arg("-B")
         .arg("-")
         .arg(LIB_PATH)
