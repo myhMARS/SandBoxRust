@@ -57,6 +57,11 @@ pub struct SandboxLimits {
     pub net: bool,
     pub max_as: u64,
     pub timeout: Duration,
+    /// When false, the zygote child skips chroot + drop_privileges
+    /// and applies Landlock + O_CREAT filter instead.
+    pub privilege: bool,
+    /// Paths allowed by Landlock in non-privileged mode.
+    pub allowed_paths: Vec<String>,
 }
 
 pub struct ZygoteManager {
@@ -77,9 +82,7 @@ impl ZygoteManager {
         lib_so: &str,
         lib_dir: &str,
         warm_modules: &[String],
-        socks5_proxy: Option<&String>,
-        http_proxy: Option<&String>,
-        https_proxy: Option<&String>,
+        proxy: &crate::config::ProxyConfig,
     ) -> io::Result<Self> {
         let (server_fd, worker_fd) = socketpair()?;
 
@@ -90,16 +93,9 @@ impl ZygoteManager {
             cmd.env("PATH", &path);
         }
         // Inject proxy env vars so the zygote and its forked children
-        // inherit them.  Mirrors the Node.js / Python slow-path runners.
-        if let Some(socks5) = socks5_proxy {
-            cmd.env("HTTPS_PROXY", socks5).env("HTTP_PROXY", socks5);
-        } else {
-            if let Some(h) = https_proxy {
-                cmd.env("HTTPS_PROXY", h);
-            }
-            if let Some(h) = http_proxy {
-                cmd.env("HTTP_PROXY", h);
-            }
+        // inherit them.
+        for (k, v) in proxy.proxy_env_vars() {
+            cmd.env(k, v);
         }
         let child = cmd
             .args([
@@ -174,6 +170,8 @@ impl ZygoteManager {
             "code": code_b64, "key": key_b64,
             "uid": limits.uid, "gid": limits.gid,
             "net": limits.net, "max_as": limits.max_as,
+            "privilege": limits.privilege,
+            "allowed_paths": limits.allowed_paths,
         }).to_string();
         let frame = encode_frame(MSG_RUN, req_id, payload.as_bytes());
 

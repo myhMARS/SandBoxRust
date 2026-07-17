@@ -31,6 +31,22 @@ impl ProxyConfig {
     pub fn https_option(&self) -> Option<&String> {
         if self.https.is_empty() { None } else { Some(&self.https) }
     }
+
+    /// Returns the proxy environment variables to inject into a child process.
+    /// Socks5 takes precedence: if set, both HTTP and HTTPS use it.
+    pub fn proxy_env_vars(&self) -> Vec<(&str, &str)> {
+        if let Some(socks5) = self.socks5_option() {
+            return vec![("HTTPS_PROXY", socks5.as_str()), ("HTTP_PROXY", socks5.as_str())];
+        }
+        let mut vars = Vec::new();
+        if let Some(h) = self.https_option() {
+            vars.push(("HTTPS_PROXY", h.as_str()));
+        }
+        if let Some(h) = self.http_option() {
+            vars.push(("HTTP_PROXY", h.as_str()));
+        }
+        vars
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,6 +64,13 @@ pub struct Config {
 
     #[serde(default)]
     pub enable_preload: bool,
+
+    /// When false, runtime pip install and chroot jail setup are skipped
+    /// (expected to be baked into the container image at build time).
+    /// Non-privileged mode also skips chroot + drop_privileges in the
+    /// seccomp sandbox and applies Landlock + O_CREAT filter instead.
+    #[serde(default = "default_true")]
+    pub privilege: bool,
 
     /// Use pre-warmed zygote for Python (Linux-only: fork + seccomp).
     #[serde(default)]
@@ -154,7 +177,7 @@ impl Config {
         if let Ok(v) = std::env::var("WORKER_TIMEOUT") {
             if let Ok(p) = v.parse() { self.worker_timeout = p; }
         }
-        if let Ok(v) = std::env::var("API_KEY") { self.app.key = v; }
+        if let Ok(v) = std::env::var("SANDBOX_API_KEY") { self.app.key = v; }
         if let Ok(v) = std::env::var("PYTHON_PATH") { self.python_path = v; }
         if let Ok(v) = std::env::var("NODEJS_PATH") { self.nodejs_path = v; }
         if let Ok(v) = std::env::var("ENABLE_NETWORK") {
@@ -162,6 +185,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("ENABLE_PRELOAD") {
             self.enable_preload = matches!(v.as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("PRIVILEGE") {
+            self.privilege = matches!(v.as_str(), "1" | "true" | "yes");
         }
         if let Ok(v) = std::env::var("PYTHON_ZYGOTE") {
             self.python_zygote = matches!(v.as_str(), "1" | "true" | "yes");
