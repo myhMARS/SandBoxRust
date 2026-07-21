@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker image
-        run: docker build -t sandbox-server:ci .
+        run: docker build -f priv.Dockerfile -t sandbox-server:ci .
 
       - name: Start container
         run: |
