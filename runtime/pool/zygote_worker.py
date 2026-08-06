@@ -19,6 +19,7 @@ import base64
 import ctypes
 import json
 import os
+import resource
 import select
 import signal
 import socket
@@ -48,6 +49,16 @@ _SEND_BUF_CAP = 4 * 1024 * 1024  # 4 MiB
 # 1 MiB; anything larger is either a corrupt stream or an attack.  Capping plen
 # here prevents an OOM from a malicious / broken frame header claiming 4 GiB.
 _MAX_FRAME_PAYLOAD = 16 * 1024 * 1024
+
+# Upper bound for the inherited-fd sweep in _child_exec(): the soft
+# RLIMIT_NOFILE, or a fixed cap when it is unlimited. No fd the child inherits
+# can exceed it — opening one would have failed with EMFILE. os.closerange()
+# maps to the close_range() syscall on Linux (one kernel-side fd-table pass).
+_soft_nofile, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+_MAX_FD = max(
+    int(_soft_nofile) if _soft_nofile not in (resource.RLIM_INFINITY, -1) else 65536,
+    4,
+)
 
 
 def _log(msg: str) -> None:
@@ -255,30 +266,16 @@ class Zygote:
             os.close(devnull)
             os.close(out_r)
             os.close(err_r)
-            # Close EVERY inherited fd except stdio (0/1/2). Enumerating
-            # /proc/self/fd catches descriptors an explicit close-set would
-            # miss — the control socket, other requests' pipes, and especially
+            # Close EVERY inherited fd except stdio (0/1/2). Runs after the
+            # dup2 redirection above, so 0/1/2 already point where they should.
+            # os.closerange() on Linux maps to the close_range() syscall — one
+            # kernel-side fd-table pass instead of a per-fd close() (CPython
+            # falls back to a C close() loop if the syscall is unavailable).
+            # This catches the control socket, other requests' pipes, and any
             # file/socket handles opened by warm-imported preload modules that
-            # fork() duplicated into this child. Runs after the dup2 redirection
-            # above, so 0/1/2 already point where they should.
-            _keep = (0, 1, 2)
-            try:
-                _inherited = [int(e) for e in os.listdir("/proc/self/fd")]
-            except (OSError, ValueError):
-                _inherited = []
-            if _inherited:
-                for _fd in _inherited:
-                    if _fd not in _keep:
-                        try:
-                            os.close(_fd)
-                        except OSError:
-                            pass
-            else:
-                # /proc unavailable: fall back to closing a bounded fd range.
-                import resource
-                _soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-                _maxfd = _soft if _soft not in (resource.RLIM_INFINITY, -1) else 65536
-                os.closerange(3, _maxfd)
+            # fork() duplicated into this child. Runs before init_seccomp below,
+            # whose whitelist allows close() but not close_range().
+            os.closerange(3, _MAX_FD)
 
             # Drop the implicit ''/cwd entry (would call getcwd() post-seccomp)
             # and the zygote's own helper dir, so user code cannot re-import the

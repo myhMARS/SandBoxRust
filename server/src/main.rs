@@ -132,11 +132,14 @@ pub(crate) fn get_zygote() -> Option<bool> { None }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let (non_blocking, _non_blocking_guard) =
+        tracing_appender::non_blocking(std::io::stdout());
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
         )
+        .with_writer(non_blocking)
         .init();
 
     let config_path =

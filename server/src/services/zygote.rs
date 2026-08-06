@@ -1,10 +1,10 @@
 //! Pre-warmed Python zygote pool — avoids per-request interpreter cold start.
 
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::io;
 use std::os::fd::FromRawFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,8 +72,8 @@ pub struct ZygoteManager {
     _child: std::process::Child,
     _read_task: JoinHandle<()>,
     running: Arc<AtomicBool>,
-    next_id: Mutex<u32>,
-    pending: Arc<Mutex<HashMap<u32, Pending>>>,
+    next_id: AtomicU32,
+    pending: Arc<DashMap<u32, Pending>>,
 }
 
 impl ZygoteManager {
@@ -120,7 +120,7 @@ impl ZygoteManager {
         let write_half = Arc::new(Mutex::new(write_half));
 
         let running = Arc::new(AtomicBool::new(true));
-        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending = Arc::new(DashMap::new());
 
         let p = pending.clone();
         let r = running.clone();
@@ -134,7 +134,7 @@ impl ZygoteManager {
             _child: child,
             _read_task: read_task,
             running,
-            next_id: Mutex::new(1),
+            next_id: AtomicU32::new(1),
             pending,
         })
     }
@@ -156,12 +156,9 @@ impl ZygoteManager {
 
         let (tx, rx) = oneshot::channel();
 
-        let mut next = self.next_id.lock().await;
-        let req_id = *next;
-        *next = (*next % 0xFFFF_FFFF) + 1;
-        drop(next);
+        let req_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        self.pending.lock().await.insert(
+        self.pending.insert(
             req_id,
             Pending { out: Vec::new(), err: Vec::new(), tx: Some(tx) },
         );
@@ -178,21 +175,21 @@ impl ZygoteManager {
         {
             let mut w = self.write_half.lock().await;
             if w.write_all(&frame).await.is_err() {
-                self.pending.lock().await.remove(&req_id);
+                self.pending.remove(&req_id);
                 return ("".into(), "zygote write failed".into(), -1);
             }
         }
 
         match tokio::time::timeout(limits.timeout, rx).await {
             Ok(Ok(result)) => {
-                self.pending.lock().await.remove(&req_id);
+                self.pending.remove(&req_id);
                 result
             }
             _ => {
                 let kill_frame = encode_frame(MSG_KILL, req_id, &[]);
                 let mut w = self.write_half.lock().await;
                 let _ = w.write_all(&kill_frame).await;
-                self.pending.lock().await.remove(&req_id);
+                self.pending.remove(&req_id);
                 ("".into(), "Execution timeout".into(), -1)
             }
         }
@@ -208,13 +205,13 @@ impl ZygoteManager {
     }
 
     async fn _fail_pending(&self, msg: &str) {
-        let mut map = self.pending.lock().await;
         let msg = msg.to_string();
-        for (_, entry) in map.drain() {
-            if let Some(tx) = entry.tx {
+        for mut entry in self.pending.iter_mut() {
+            if let Some(tx) = entry.tx.take() {
                 let _ = tx.send(("".into(), msg.clone(), -1));
             }
         }
+        self.pending.clear();
     }
 }
 
@@ -254,7 +251,7 @@ fn max_output_bytes() -> usize {
 async fn read_loop(
     mut rd: OwnedReadHalf,
     write_half: Arc<Mutex<OwnedWriteHalf>>,
-    pending: Arc<Mutex<HashMap<u32, Pending>>>,
+    pending: Arc<DashMap<u32, Pending>>,
     running: Arc<AtomicBool>,
     max_output: usize,
 ) {
@@ -294,46 +291,61 @@ async fn read_loop(
 
             // Must release pending lock before acquiring write_half (lock ordering).
             let mut kill_req: Option<u32> = None;
-            {
-                let mut pending_map = pending.lock().await;
-                if let Some(entry) = pending_map.get_mut(&req_id) {
-                    match mtype {
-                        MSG_STDOUT => entry.out.extend_from_slice(&payload),
-                        MSG_STDERR => entry.err.extend_from_slice(&payload),
-                        MSG_DONE => {
-                            let exit_code = if payload.len() >= 4 {
-                                i32::from_be_bytes([
-                                    payload[0], payload[1], payload[2], payload[3],
-                                ])
-                            } else {
-                                -1
-                            };
-                            let out = String::from_utf8_lossy(&entry.out).into_owned();
-                            let err = String::from_utf8_lossy(&entry.err).into_owned();
-                            if let Some(tx) = entry.tx.take() {
-                                let _ = tx.send((out, err, exit_code));
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    if matches!(mtype, MSG_STDOUT | MSG_STDERR)
-                        && entry.out.len() + entry.err.len() > max_output
-                    {
+            let mut limit_result = None;
+            if let Some(mut entry) = pending.get_mut(&req_id) {
+                match mtype {
+                    MSG_STDOUT => entry.out.extend_from_slice(&payload),
+                    MSG_STDERR => entry.err.extend_from_slice(&payload),
+                    MSG_DONE => {
+                        let exit_code = if payload.len() >= 4 {
+                            i32::from_be_bytes([
+                                payload[0], payload[1], payload[2], payload[3],
+                            ])
+                        } else {
+                            -1
+                        };
                         let out = String::from_utf8_lossy(&entry.out).into_owned();
+                        let err = String::from_utf8_lossy(&entry.err).into_owned();
                         if let Some(tx) = entry.tx.take() {
-                            let _ = tx.send((
-                                out,
-                                format!(
-                                    "output limit exceeded (> {max_output} bytes); process killed"
-                                ),
-                                -1,
-                            ));
+                            let _ = tx.send((out, err, exit_code));
                         }
-                        pending_map.remove(&req_id);
-                        kill_req = Some(req_id);
                     }
+                    _ => {}
                 }
+
+                if matches!(mtype, MSG_STDOUT | MSG_STDERR)
+                    && entry.out.len().saturating_add(entry.err.len()) > max_output
+                {
+                    // Move data out of the shard write-lock guard. remove() below
+                    // must NOT run here: DashMap's RwLock is not reentrant, so
+                    // removing the same key while get_mut()'s guard is alive
+                    // re-acquires the shard lock and self-deadlocks.
+                    limit_result = Some((
+                        std::mem::take(&mut entry.out),
+                        entry.tx.take(),
+                    ));
+                }
+            } // DashMap shard guard dropped; remove() is safe now
+
+            if let Some((out_bytes, tx)) = limit_result {
+                pending.remove(&req_id);
+
+                let out = match String::from_utf8(out_bytes) {
+                    Ok(s) => s,
+                    Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+                };
+
+                if let Some(tx) = tx {
+                    let _ = tx.send((
+                        out,
+                        format!(
+                            "output limit exceeded (> {max_output} bytes); process killed"
+                        ),
+                        -1,
+                    ));
+                }
+
+                kill_req = Some(req_id);
             }
             if let Some(rid) = kill_req {
                 let frame = encode_frame(MSG_KILL, rid, &[]);
@@ -347,12 +359,12 @@ async fn read_loop(
     running.store(false, Ordering::SeqCst);
     tracing::error!("Python zygote connection lost; will restart on next request");
 
-    let mut pending_map = pending.lock().await;
-    for (_, entry) in pending_map.drain() {
-        if let Some(tx) = entry.tx {
+    for mut entry in pending.iter_mut() {
+        if let Some(tx) = entry.tx.take() {
             let _ = tx.send(("".into(), "zygote connection lost".into(), -1));
         }
     }
+    pending.clear();
 }
 
 #[cfg(test)]
@@ -366,11 +378,11 @@ mod tests {
         let (worker, server) = UnixStream::pair().unwrap();
         let (s_read, s_write) = server.into_split();
         let write_half = Arc::new(Mutex::new(s_write));
-        let pending: Arc<Mutex<HashMap<u32, Pending>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<DashMap<u32, Pending>> = Arc::new(DashMap::new());
         let running = Arc::new(AtomicBool::new(true));
 
         let (tx, rx) = oneshot::channel();
-        pending.lock().await.insert(
+        pending.insert(
             7,
             Pending { out: Vec::new(), err: Vec::new(), tx: Some(tx) },
         );
@@ -407,7 +419,73 @@ mod tests {
         assert_eq!(u32::from_be_bytes([hdr[5], hdr[6], hdr[7], hdr[8]]), 7);
 
         // Over-limit request's buffer was freed.
-        assert!(pending.lock().await.get(&7).is_none());
+        assert!(pending.get(&7).is_none());
+
+        task.abort();
+    }
+
+    /// Regression: the output-over-limit branch must not hold the DashMap shard
+    /// write guard while remove()-ing the same key (DashMap's RwLock is not
+    /// reentrant — re-acquiring the shard lock self-deadlocks the reader).
+    /// A subsequent normal request completing proves the reader kept going.
+    #[tokio::test]
+    async fn output_limit_does_not_hang_reader() {
+        let (worker, server) = UnixStream::pair().unwrap();
+        let (s_read, s_write) = server.into_split();
+        let write_half = Arc::new(Mutex::new(s_write));
+        let pending: Arc<DashMap<u32, Pending>> = Arc::new(DashMap::new());
+        let running = Arc::new(AtomicBool::new(true));
+
+        // Request 7 exceeds the cap; request 8 must still complete afterwards.
+        let (tx7, rx7) = oneshot::channel();
+        pending.insert(7, Pending { out: Vec::new(), err: Vec::new(), tx: Some(tx7) });
+        let (tx8, rx8) = oneshot::channel();
+        pending.insert(8, Pending { out: Vec::new(), err: Vec::new(), tx: Some(tx8) });
+
+        let max_output = 100usize;
+        let task = {
+            let p = pending.clone();
+            let r = running.clone();
+            let w = write_half.clone();
+            tokio::spawn(async move { read_loop(s_read, w, p, r, max_output).await })
+        };
+
+        let (mut rd_worker, mut wr_worker) = worker.into_split();
+
+        // Over-limit: 120 bytes of stdout on req 7 (> 100 cap). Split into two
+        // 60-byte frames so each stays under the per-frame cap and the *accumulated*
+        // output limit path is the one exercised.
+        let chunk = vec![b'x'; 60];
+        wr_worker.write_all(&encode_frame(MSG_STDOUT, 7, &chunk)).await.unwrap();
+        wr_worker.write_all(&encode_frame(MSG_STDOUT, 7, &chunk)).await.unwrap();
+
+        let (_out, err, code) = tokio::time::timeout(Duration::from_secs(2), rx7)
+            .await
+            .expect("req 7 rx timed out")
+            .expect("req 7 sender dropped");
+        assert_eq!(code, -1);
+        assert!(err.contains("output limit exceeded"), "unexpected err: {err}");
+        assert!(pending.get(&7).is_none(), "over-limit entry not cleaned up");
+
+        // Manager sent MSG_KILL for req 7 back to the worker.
+        let mut hdr = [0u8; HEADER_SIZE];
+        tokio::time::timeout(Duration::from_secs(2), rd_worker.read_exact(&mut hdr))
+            .await
+            .expect("no kill frame")
+            .expect("read kill frame");
+        assert_eq!(hdr[4], MSG_KILL, "expected MSG_KILL frame");
+        assert_eq!(u32::from_be_bytes([hdr[5], hdr[6], hdr[7], hdr[8]]), 7);
+
+        // Reader survived the limit branch: a later normal request completes.
+        wr_worker.write_all(&encode_frame(MSG_STDOUT, 8, b"hello")).await.unwrap();
+        wr_worker.write_all(&encode_frame(MSG_DONE, 8, &1i32.to_be_bytes())).await.unwrap();
+        let (out, err, code) = tokio::time::timeout(Duration::from_secs(2), rx8)
+            .await
+            .expect("req 8 rx timed out — reader hung after output limit")
+            .expect("req 8 sender dropped");
+        assert_eq!(out, "hello");
+        assert_eq!(err, "");
+        assert_eq!(code, 1);
 
         task.abort();
     }

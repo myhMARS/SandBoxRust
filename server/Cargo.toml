@@ -13,10 +13,12 @@ rand = "0.10.2"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 toml = "1"
 libc = "0.2"
 subtle = "2.6"
 async-channel = "2.3"
+dashmap = "6"
 
 [features]
 default = []
