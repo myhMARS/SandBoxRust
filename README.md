@@ -1,15 +1,56 @@
 <p align="center">
-  <h1 align="center">SandBoxRust</h1>
-  <p align="center">A high-performance, seccomp-based code execution sandbox for Python and Node.js with 10-layer defense-in-depth.</p>
-</p>
-
-<p align="center">
+  <img src="https://img.shields.io/github/stars/myhMARS/SandBoxRust?style=flat-square" alt="GitHub stars">
   <a href="https://github.com/myhMARS/SandBoxRust/actions"><img src="https://img.shields.io/github/actions/workflow/status/myhMARS/SandBoxRust/ci.yml?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.97%2B-orange.svg" alt="Rust"></a>
+  <a href="https://github.com/myhMARS/SandBoxRust"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs welcome"></a>
+</p>
+
+<h1 align="center">SandBoxRust</h1>
+
+<p align="center">
+  <b>A high-performance, seccomp-based code-execution sandbox for Python and Node.js</b><br>
+  with a 10-layer defense-in-depth security model, sub-millisecond cold starts, and dual
+  privileged / non-privileged (Kubernetes-ready) deployment modes.
 </p>
 
 ---
+
+## Table of Contents
+
+- [Why SandBoxRust?](#why-sandboxrust)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [API](#api)
+- [Configuration](#configuration)
+- [Architecture](#architecture)
+- [Security Model](#security-model)
+- [Project Layout](#project-layout)
+- [Testing](#testing)
+- [Limitations](#limitations)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Why SandBoxRust?
+
+Running untrusted, user-supplied code is the riskiest thing most platforms do. A single
+bug in your executor is a full server compromise. SandBoxRust exists to give you a
+battle-tested answer that is **fast, isolated, and self-hostable**:
+
+- **Defense-in-depth, not a single wall.** seccomp, chroot/Landlock, privilege dropping,
+  memory caps, and code encryption are all applied — so a failure in one layer is caught
+  by the next.
+- **Sub-millisecond cold starts.** A pre-warmed Python zygote pool forks via copy-on-write,
+  so a request doesn't pay the interpreter startup cost.
+- **Zero temp files.** Code is XOR-encrypted and streamed over a pipe, decrypted only after
+  the sandbox is applied — it never touches disk.
+- **Runs in Kubernetes.** A non-privileged mode uses Linux Landlock instead of chroot, so it
+  works in containers that drop `CAP_SYS_CHROOT`.
+
+> **Not a VM.** SandBoxRust isolates *processes*, not kernels. It is a userspace,
+> Linux-native sandbox. If you need hardware-level isolation, pair it with something like
+> Firecracker or gVisor. See [Limitations](#limitations).
+
 ## Features
 
 - **seccomp-bpf syscall filtering** — per-language whitelists (~74 syscalls Python, ~56 Node.js); `openat` allowed only without `O_CREAT` (no file creation)
@@ -17,13 +58,15 @@
 - **chroot filesystem isolation** (privileged mode) — sandboxed to `/usr/local/share/sandbox` with hard-linked read-only system libraries
 - **Privilege dropping** — `setgroups(0)` → `setgid` → `setuid` to non-root (`65537:65537`), `PR_SET_NO_NEW_PRIVS` + `PR_SET_DUMPABLE=0`
 - **Pre-warmed zygote pool** — Python interpreter and stdlib modules pre-loaded; children forked via copy-on-write for sub-ms cold starts
-- **RLIMIT_AS address space cap** — 1 GiB Python / 2 GiB Node.js; runaway allocations fail with ENOMEM instead of OOMing the host
+- **RLIMIT_AS address space cap** — 256 MiB Python / 512 MiB Node.js; runaway allocations fail with ENOMEM instead of OOMing the host
 - **Per-request stdin execution** — no temp files; code XOR-encrypted and fed over a pipe, decrypted after sandbox is applied
 - **Concurrency control** — configurable MPMC worker pool with FIFO queuing and structured per-request logging
 - **Dual-mode deployment** — privileged (chroot) and non-privileged (Landlock) modes for Kubernetes compatibility
 - **Crash recovery** — zygote single-flight auto-restart on connection loss; event loop crash isolation per-request
 
 ## Quick Start
+
+### Docker (recommended)
 
 ```bash
 # Privileged mode (chroot-based)
@@ -55,7 +98,7 @@ CONFIG_PATH=runtime/config.toml cargo run -p sandbox-server
 
 ## API
 
-**Authentication:** All endpoints except `/health` require `X-Api-Key` header (constant-time comparison via `subtle` crate).
+**Authentication:** All endpoints except `/health` require an `X-Api-Key` header (constant-time comparison via the `subtle` crate).
 
 ### `GET /health`
 
@@ -111,14 +154,14 @@ curl -X POST http://127.0.0.1:8194/v1/sandbox/run \
 
 ## Configuration
 
-Defaults are in [`runtime/config.toml`](runtime/config.toml). Every value is overridable by environment variable.
+Defaults ship in [`runtime/config.toml`](runtime/config.toml). Every value can be overridden by an environment variable.
 
 | Key | Env Variable | Default | Description |
 |-----|-------------|---------|-------------|
 | `app.port` | `SANDBOX_PORT` | `8194` | HTTP listen port |
 | `app.key` | `SANDBOX_API_KEY` | `sandbox` | API key for request auth |
 | `max_workers` | `MAX_WORKERS` | `4` | Max concurrent sandbox executions |
-| `worker_timeout` | `WORKER_TIMEOUT` | `30` | Per-request timeout (seconds) |
+| `worker_timeout` | `WORKER_TIMEOUT` | `15` | Per-request timeout (seconds) |
 | `enable_network` | `ENABLE_NETWORK` | `true` | Global network opt-in gate |
 | `enable_preload` | `ENABLE_PRELOAD` | `false` | Allow per-request `preload` code injection |
 | `privilege` | `PRIVILEGE` | `true` | Privileged mode (`false` = Landlock instead of chroot) |
@@ -127,8 +170,8 @@ Defaults are in [`runtime/config.toml`](runtime/config.toml). Every value is ove
 | `nodejs_path` | `NODEJS_PATH` | `/usr/bin/node` | Node.js interpreter path |
 | `sandbox_uid` | — | `65537` | UID after privilege drop |
 | `sandbox_gid` | — | `65537` | GID after privilege drop (must not be 0) |
-| `python_max_as_bytes` | `PYTHON_MAX_AS_BYTES` | `1073741824` | Python RLIMIT_AS cap (1 GiB) |
-| `nodejs_max_as_bytes` | `NODEJS_MAX_AS_BYTES` | `2147483648` | Node.js RLIMIT_AS cap (2 GiB) |
+| `python_max_as_bytes` | `PYTHON_MAX_AS_BYTES` | `268435456` | Python RLIMIT_AS cap (256 MiB) |
+| `nodejs_max_as_bytes` | `NODEJS_MAX_AS_BYTES` | `536870912` | Node.js RLIMIT_AS cap (512 MiB, jitless) |
 | `python_lib_paths` | `PYTHON_LIB_PATH` | *(see config.toml)* | Comma-separated paths to copy into chroot jail |
 | `nodejs_lib_paths` | `NODEJS_LIB_PATH` | *(see config.toml)* | Comma-separated paths to copy into chroot jail |
 | `proxy.socks5` | `SOCKS5_PROXY` | — | SOCKS5 proxy (takes precedence over HTTP/HTTPS) |
@@ -141,7 +184,7 @@ Defaults are in [`runtime/config.toml`](runtime/config.toml). Every value is ove
 |-------------|---------|-------------|
 | `CONFIG_PATH` | `runtime/config.toml` | Path to TOML config file |
 | `ALLOWED_SYSCALLS` | *(built-in whitelist)* | Comma-separated syscall numbers — **replaces** the default whitelist |
-| `NODE_MAX_OLD_SPACE_MB` | `768` | V8 old-space heap cap (MiB), below RLIMIT_AS |
+| `NODE_MAX_OLD_SPACE_MB` | `256` | V8 old-space heap cap (MiB), below RLIMIT_AS |
 | `ZYGOTE_MAX_OUTPUT_BYTES` | `10485760` (10 MiB) | Per-request stdout+stderr cap in zygote path |
 
 ## Architecture
@@ -198,7 +241,7 @@ HTTP Request
 | **API auth** | Constant-time `X-Api-Key` comparison via `subtle` crate to prevent timing side-channels |
 | **Worker pool** | MPMC channel-based concurrency control, bounded by `max_workers` |
 | **Timeout** | `tokio::time::timeout` + `kill_on_drop` → SIGKILL on expiry |
-| **RLIMIT_AS** | Virtual address space cap (1 GiB Python / 2 GiB Node.js); 0 disables |
+| **RLIMIT_AS** | Virtual address space cap (256 MiB Python / 512 MiB Node.js); 0 disables |
 | **chroot / Landlock** | Privileged: `chroot(.)` + `chdir(/)`. Non-privileged: Landlock ABI V6 `PATH_BENEATH` rules with `Scope::Signal` |
 | **no_new_privs + dumpable** | `PR_SET_NO_NEW_PRIVS` (block SUID escalation) + `PR_SET_DUMPABLE=0` (hide `/proc/<pid>/` from same-UID peers) |
 | **Privilege drop** | `setgroups(0)` → `setgid` → `setuid` to non-root `65537:65537` |
@@ -299,8 +342,44 @@ python tests/stress_test.py -n 50 -c 10
 python tests/security_audit.py
 ```
 
-Both Python scripts read `tests/.env` for target URL and API key. Copy [`.env.example`](tests/.env.example) to `.env` and edit as needed.
+Both Python scripts read `tests/.env` (falling back to environment variables) for the
+target URL and API key:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SANDBOX_URL` | `http://127.0.0.1:8194` | Base URL of the running sandbox server |
+| `API_KEY` | `sandbox` | API key used for authenticated requests |
+
+## Limitations
+
+SandBoxRust is a strong process-level sandbox, but no sandbox is a substitute for layered
+defense. Be aware of the following:
+
+- **Kernel shared, not a VM.** All requests run in processes that share your host kernel.
+  A kernel-level 0-day could cross the boundary. For untrusted-code *at scale*, run the
+  container itself with minimal privileges and consider VM-level isolation (Firecracker,
+  gVisor, microVMs) in front.
+- **Linux-only.** seccomp-bpf, chroot, and Landlock are Linux APIs. There is no macOS or
+  Windows equivalent of the security model.
+- **Memory caps are soft ceilings.** `RLIMIT_AS` bounds address space, not physical memory;
+  very aggressive workloads may still be CPU-bound. Pair with cgroups for hard limits.
+- **Privileged mode needs `CAP_SYS_CHROOT`.** Use non-privileged (Landlock) mode where the
+  orchestrator drops that capability.
+
+Treat the shipped configuration as a starting point, not a guarantee — audit it against
+your own threat model before exposing the service to untrusted traffic.
+
+## Contributing
+
+Contributions are welcome! Bug reports, feature requests, and pull requests all help.
+
+1. Fork the repository and create a feature branch.
+2. Keep changes focused and add tests where it makes sense.
+3. Run `cargo clippy -p sandbox-server -- -D warnings` and the test suite before opening a PR.
+4. Open a pull request against `main` with a clear description.
+
+Please report security issues privately rather than opening a public issue.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) © 2025 [myhMARS](https://github.com/myhMARS)
